@@ -1,0 +1,29 @@
+services:
+  hermes:
+    image: "docker.io/nousresearch/hermes-agent:main@sha256:8cbf4cd279f835e2616e25481fe0b7ee1730224c320879206e1537536f2d6fda"
+    platform: linux/amd64
+    restart: unless-stopped
+    command:
+      - sh
+      - -c
+      - |
+        cat > /opt/data/config.yaml <<'CFG'
+        model:
+          provider: zai
+          default: glm-5-turbo
+          base_url: https://api.z.ai/api/coding/paas/v4
+          api_mode: chat_completions
+        CFG
+        exec hermes gateway run
+    environment:
+      - GLM_BASE_URL=https://api.z.ai/api/coding/paas/v4
+      - GLM_API_KEY=${GLM_API_KEY}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - TELEGRAM_ALLOWED_USERS=${TELEGRAM_ALLOWED_USERS}
+      - TELEGRAM_GROUP_ALLOWED_CHATS=${TELEGRAM_GROUP_ALLOWED_CHATS}
+    volumes:
+      - hermes-data:/opt/data
+
+volumes:
+  hermes-data:
