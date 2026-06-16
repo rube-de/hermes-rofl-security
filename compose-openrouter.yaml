@@ -1,19 +1,148 @@
 services:
+  rclone-restore:
+    image: "docker.io/rclone/rclone:1.69@sha256:1f497a86a6466395e62a5886613a14b7b18809543566ef9fa35fa1371a7ecc0f"
+    platform: linux/amd64
+    user: "10000:10000"
+    restart: "no"
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        set -eu
+        echo "[restore] starting at $$(date -u +%FT%TZ)"
+        if ! listing=$$(rclone lsf crypt: 2>&1); then
+          echo "[restore] FATAL: cannot access crypt: $$listing" >&2
+          exit 1
+        fi
+        if [ -z "$$listing" ]; then
+          echo "[restore] remote is empty (first-ever deployment), nothing to restore"
+          exit 0
+        fi
+        echo "[restore] copying crypt: -> /sync"
+        rclone copy crypt: /sync \
+          --update --checksum \
+          --log-level INFO \
+          --stats 30s --stats-one-line
+        count=$$(find /sync -type f | wc -l)
+        size=$$(du -sh /sync | awk '{print $$1}')
+        echo "[restore] complete: $$count files, $$size"
+    environment:
+      - HOME=/tmp
+      - RCLONE_CONFIG_AKAVE_TYPE=s3
+      - RCLONE_CONFIG_AKAVE_PROVIDER=Other
+      - RCLONE_CONFIG_AKAVE_REGION=akave-network
+      - RCLONE_CONFIG_AKAVE_ENDPOINT=${AKAVE_ENDPOINT}
+      - RCLONE_CONFIG_AKAVE_ACCESS_KEY_ID=${AKAVE_ACCESS_KEY}
+      - RCLONE_CONFIG_AKAVE_SECRET_ACCESS_KEY=${AKAVE_SECRET_KEY}
+      - RCLONE_CONFIG_AKAVE_FORCE_PATH_STYLE=true
+      - RCLONE_CONFIG_CRYPT_TYPE=crypt
+      - RCLONE_CONFIG_CRYPT_REMOTE=akave:${AKAVE_BUCKET}
+      - RCLONE_CONFIG_CRYPT_FILENAME_ENCRYPTION=standard
+      - RCLONE_CONFIG_CRYPT_PASSWORD=${RCLONE_CRYPT_PASSWORD}
+      - RCLONE_CONFIG_CRYPT_PASSWORD2=${RCLONE_CRYPT_SALT}
+    volumes:
+      - hermes-data:/sync
+
+  rclone-sync:
+    image: "docker.io/rclone/rclone:1.69@sha256:1f497a86a6466395e62a5886613a14b7b18809543566ef9fa35fa1371a7ecc0f"
+    platform: linux/amd64
+    user: "10000:10000"
+    restart: unless-stopped
+    entrypoint: /bin/sh
+    depends_on:
+      rclone-restore:
+        condition: service_completed_successfully
+    command:
+      - -c
+      - |
+        set -u
+        INTERVAL=$${SYNC_INTERVAL:-300}
+
+        shutdown_requested=0
+        shutdown() {
+          echo "[sync] signal received, will flush after current cycle"
+          shutdown_requested=1
+        }
+        trap shutdown TERM INT
+
+        run_sync() {
+          echo "[sync] cycle starting at $$(date -u +%FT%TZ)"
+          start=$$(date +%s)
+          if rclone sync /sync crypt: \
+               --update --delete-during \
+               --exclude=logs/** \
+               --exclude=.cache/** \
+               --exclude=.npm/** \
+               --exclude=node_modules/** \
+               --exclude=__pycache__/** \
+               --exclude=*.pyc \
+               --exclude=.pytest_cache/** \
+               --exclude=.mypy_cache/** \
+               --exclude=.ruff_cache/** \
+               --exclude=.tox/** \
+               --exclude=.venv/** \
+               --log-level INFO --stats 0; then
+            elapsed=$$(( $$(date +%s) - start ))
+            echo "[sync] cycle complete in $${elapsed}s"
+          else
+            rc=$$?
+            echo "[sync] WARN: cycle failed (rc=$$rc), continuing" >&2
+          fi
+        }
+
+        echo "[sync] loop starting, interval=$${INTERVAL}s"
+
+        while [ "$$shutdown_requested" -eq 0 ]; do
+          run_sync
+          [ "$$shutdown_requested" -eq 1 ] && break
+          sleep "$$INTERVAL" &
+          wait $$! 2>/dev/null || true
+        done
+
+        echo "[sync] flushing final cycle before exit"
+        run_sync
+        echo "[sync] exiting"
+    environment:
+      - HOME=/tmp
+      - SYNC_INTERVAL=${SYNC_INTERVAL:-300}
+      - RCLONE_CONFIG_AKAVE_TYPE=s3
+      - RCLONE_CONFIG_AKAVE_PROVIDER=Other
+      - RCLONE_CONFIG_AKAVE_REGION=akave-network
+      - RCLONE_CONFIG_AKAVE_ENDPOINT=${AKAVE_ENDPOINT}
+      - RCLONE_CONFIG_AKAVE_ACCESS_KEY_ID=${AKAVE_ACCESS_KEY}
+      - RCLONE_CONFIG_AKAVE_SECRET_ACCESS_KEY=${AKAVE_SECRET_KEY}
+      - RCLONE_CONFIG_AKAVE_FORCE_PATH_STYLE=true
+      - RCLONE_CONFIG_CRYPT_TYPE=crypt
+      - RCLONE_CONFIG_CRYPT_REMOTE=akave:${AKAVE_BUCKET}
+      - RCLONE_CONFIG_CRYPT_FILENAME_ENCRYPTION=standard
+      - RCLONE_CONFIG_CRYPT_PASSWORD=${RCLONE_CRYPT_PASSWORD}
+      - RCLONE_CONFIG_CRYPT_PASSWORD2=${RCLONE_CRYPT_SALT}
+    volumes:
+      - hermes-data:/sync
+
   hermes:
     image: "docker.io/nousresearch/hermes-agent:main@sha256:8cbf4cd279f835e2616e25481fe0b7ee1730224c320879206e1537536f2d6fda"
     platform: linux/amd64
     restart: unless-stopped
+    depends_on:
+      rclone-restore:
+        condition: service_completed_successfully
     command:
       - sh
       - -c
       - |
-        cat > /opt/data/config.yaml <<'CFG'
+        mkdir -p /opt/data/vault
+        if [ ! -f /opt/data/.compose-initialized ]; then
+          cat > /opt/data/config.yaml <<'CFG'
         model:
           provider: openrouter
           default: anthropic/claude-opus-4.6
           base_url: https://openrouter.ai/api/v1
           api_mode: chat_completions
         CFG
+          touch /opt/data/.compose-initialized
+          echo "[hermes] first boot: wrote default config.yaml from compose"
+        fi
         exec hermes gateway run
     environment:
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
