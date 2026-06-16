@@ -148,9 +148,17 @@ running the bundle you built.
   Hermes' OpenAI-compatible Gateway API (8642) stay unpublished; the gateway is
   the sole perimeter. `compose-openrouter.yaml` publishes nothing — Telegram is
   outbound long-polling.
-- **Image is pinned.** Bumping Hermes = resolve the new digest with
-  `docker buildx imagetools inspect docker.io/nousresearch/hermes-agent:main`,
-  edit the `image:` line in both compose files, rebuild, update, redeploy.
+- **Pin images by digest for production.** The two `rclone` sidecars are already
+  pinned (`rclone:1.69@sha256:…`), but the app images in `compose.yaml` —
+  `hermes`, `hermes-dashboard`, and the `wallet-gateway` — track floating
+  `:latest` tags for convenience. That's fine while iterating, but **in
+  production pin each to a digest instead of a bare `:latest`**: the enclave
+  identity is derived from the exact bundle, so a floating tag means the attested
+  image can change under you and the build isn't reproducible. Resolve a digest
+  with `docker buildx imagetools inspect docker.io/nousresearch/hermes-agent:latest`
+  and replace `:latest` with `@sha256:…` (see `compose-openrouter.yaml`, which
+  pins Hermes this way). Then rebuild, update, redeploy — which rotates the
+  enclave ID.
 - **Switching compose files rotates the enclave ID.** Any client that pinned
   the previous attestation will need to re-trust the new identity.
 
