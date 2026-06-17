@@ -81,6 +81,7 @@ services:
                --exclude=.ruff_cache/** \
                --exclude=.tox/** \
                --exclude=.venv/** \
+               --exclude=security/live/** \
                --log-level INFO --stats 0; then
             elapsed=$$(( $$(date +%s) - start ))
             echo "[sync] cycle complete in $${elapsed}s"
@@ -127,11 +128,17 @@ services:
     restart: unless-stopped
     depends_on:
       - hermes-dashboard
+      - hermes-security-dashboard
     ports:
       - "8080:8080"
     environment:
       - PORT=8080
       - HERMES_TARGET=http://hermes-dashboard:9119
+      # Path-routed second upstream behind the same SIWE gate: /security/* -> the
+      # security dashboard; every other path falls through to HERMES_TARGET. The
+      # gateway forwards the path untouched, so the upstream image bakes
+      # BASE_PATH=/security. https://github.com/rube-de/hermes-wallet-gateway
+      - 'GATEWAY_ROUTES={"/security":"http://hermes-security-dashboard:3000"}'
       - WALLET_CHAIN_ID=1
       - WALLET_SESSION_TTL=43200
       - WALLET_STATEMENT=Sign in to the Hermes dashboard.
@@ -165,6 +172,33 @@ services:
     environment:
       - HERMES_UID=10000
       - HERMES_GID=10000
+
+  hermes-security-dashboard:
+    # SIWE-gated security findings dashboard, served under /security by the
+    # wallet-gateway (see GATEWAY_ROUTES). The image is built with
+    # BASE_PATH=/security baked in, so it answers only under that prefix.
+    # https://github.com/rube-de/hermes-security-dashboard
+    # No `ports:` — like hermes-dashboard, the gateway is the sole perimeter;
+    # reachable internally at http://hermes-security-dashboard:3000.
+    image: ghcr.io/rube-de/hermes-security-dashboard:latest-security
+    platform: linux/amd64
+    restart: unless-stopped
+    depends_on:
+      rclone-restore:
+        condition: service_completed_successfully
+    environment:
+      # Live WAL DB is isolated under security/live/ (excluded from sync); only
+      # the VACUUM-INTO snapshot at security/snapshot.db is shipped to Akave and
+      # restored on boot. Copying a live SQLite file with rclone is unsafe.
+      - HERMES_DB=/data/security/live/hermes.db
+      - HERMES_DB_SNAPSHOT=/data/security/snapshot.db
+      - HERMES_SNAPSHOT_INTERVAL=300
+      # Start empty; the security-review cron pushes real findings via the API.
+      - HERMES_SEED_DEMO=false
+      # ROFL secret — also given to the review cron so its writes authenticate.
+      - HERMES_API_TOKEN=${HERMES_API_TOKEN}
+    volumes:
+      - hermes-data:/data
 
   hermes:
     image: docker.io/nousresearch/hermes-agent:latest
