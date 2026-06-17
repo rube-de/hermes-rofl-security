@@ -239,6 +239,8 @@ services:
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
       - TELEGRAM_ALLOWED_USERS=${TELEGRAM_ALLOWED_USERS}
       - TELEGRAM_GROUP_ALLOWED_CHATS=${TELEGRAM_GROUP_ALLOWED_CHATS}
+      # Bearer token so this agent's security-review writes authenticate to the dashboard API.
+      - HERMES_API_TOKEN=${HERMES_API_TOKEN}
       - HERMES_UID=10000
       - HERMES_GID=10000
     volumes:

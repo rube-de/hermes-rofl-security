@@ -81,6 +81,7 @@ services:
                --exclude=.ruff_cache/** \
                --exclude=.tox/** \
                --exclude=.venv/** \
+               --exclude=security/live/** \
                --log-level INFO --stats 0; then
             elapsed=$$(( $$(date +%s) - start ))
             echo "[sync] cycle complete in $${elapsed}s"
@@ -120,8 +121,95 @@ services:
     volumes:
       - hermes-data:/sync
 
+  wallet-gateway:
+    # SIWE wallet gate: https://github.com/rube-de/hermes-wallet-gateway
+    # Use the published image or build your own (see that repo).
+    image: ghcr.io/rube-de/hermes-wallet-gateway:latest
+    # :latest is mutable and ROFL caches images, so force a fresh pull on redeploy.
+    pull_policy: always
+    restart: unless-stopped
+    depends_on:
+      - hermes-dashboard
+      - hermes-security-dashboard
+    ports:
+      - "8080:8080"
+    environment:
+      - PORT=8080
+      - HERMES_TARGET=http://hermes-dashboard:9119
+      # Path-routed second upstream behind the same SIWE gate: /security/* -> the
+      # security dashboard; every other path falls through to HERMES_TARGET. The
+      # gateway forwards the path untouched, so the upstream image bakes
+      # BASE_PATH=/security. https://github.com/rube-de/hermes-wallet-gateway
+      - 'GATEWAY_ROUTES={"/security":"http://hermes-security-dashboard:3000"}'
+      - WALLET_CHAIN_ID=1
+      - WALLET_SESSION_TTL=43200
+      - WALLET_STATEMENT=Sign in to the Hermes dashboard.
+      # --- the two ROFL secrets (injected as env by the TEE) ---
+      - WALLET_WHITELIST=${WALLET_WHITELIST}
+      - WALLET_SESSION_SECRET=${WALLET_SESSION_SECRET}
+      # Set this to the proxy host AFTER first deploy (oasis rofl machine show),
+      # then `oasis rofl update`. Until then SIWE domain-binding can't be final.
+      - WALLET_DOMAIN=${WALLET_DOMAIN}
+
+  hermes-dashboard:
+    image: docker.io/nousresearch/hermes-agent:latest
+    # :latest is mutable and ROFL caches images, so force a fresh pull on redeploy.
+    pull_policy: always
+    platform: linux/amd64
+    restart: unless-stopped
+    # Bind to all interfaces on the internal network with the auth gate OFF
+    # (--insecure). Safe ONLY because there is no `ports:` entry -> not publicly
+    # reachable; the wallet-gateway is the sole perimeter and enforces auth.
+    command:
+      [
+        "dashboard",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "9119",
+        "--insecure",
+        "--no-open",
+        "--skip-build",
+      ]
+    volumes:
+      - hermes-data:/opt/data
+    environment:
+      - HERMES_UID=10000
+      - HERMES_GID=10000
+
+  hermes-security-dashboard:
+    # SIWE-gated security findings dashboard, served under /security by the
+    # wallet-gateway (see GATEWAY_ROUTES). The image is built with
+    # BASE_PATH=/security baked in, so it answers only under that prefix.
+    # https://github.com/rube-de/hermes-security-dashboard
+    # No `ports:` — like hermes-dashboard, the gateway is the sole perimeter;
+    # reachable internally at http://hermes-security-dashboard:3000.
+    image: ghcr.io/rube-de/hermes-security-dashboard:latest-security
+    # :latest-security is mutable and ROFL caches images, so force a fresh pull on redeploy.
+    pull_policy: always
+    platform: linux/amd64
+    restart: unless-stopped
+    depends_on:
+      rclone-restore:
+        condition: service_completed_successfully
+    environment:
+      # Live WAL DB is isolated under security/live/ (excluded from sync); only
+      # the VACUUM-INTO snapshot at security/snapshot.db is shipped to Akave and
+      # restored on boot. Copying a live SQLite file with rclone is unsafe.
+      - HERMES_DB=/data/security/live/hermes.db
+      - HERMES_DB_SNAPSHOT=/data/security/snapshot.db
+      - HERMES_SNAPSHOT_INTERVAL=300
+      # Start empty; the security-review cron pushes real findings via the API.
+      - HERMES_SEED_DEMO=false
+      # ROFL secret — also given to the review cron so its writes authenticate.
+      - HERMES_API_TOKEN=${HERMES_API_TOKEN}
+    volumes:
+      - hermes-data:/data
+
   hermes:
-    image: "docker.io/nousresearch/hermes-agent:main@sha256:8cbf4cd279f835e2616e25481fe0b7ee1730224c320879206e1537536f2d6fda"
+    image: docker.io/nousresearch/hermes-agent:latest
+    # :latest is mutable and ROFL caches images, so force a fresh pull on redeploy.
+    pull_policy: always
     platform: linux/amd64
     restart: unless-stopped
     depends_on:
@@ -149,6 +237,10 @@ services:
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
       - TELEGRAM_ALLOWED_USERS=${TELEGRAM_ALLOWED_USERS}
       - TELEGRAM_GROUP_ALLOWED_CHATS=${TELEGRAM_GROUP_ALLOWED_CHATS}
+      # Bearer token so this agent's security-review writes authenticate to the dashboard API.
+      - HERMES_API_TOKEN=${HERMES_API_TOKEN}
+      - HERMES_UID=10000
+      - HERMES_GID=10000
     volumes:
       - hermes-data:/opt/data
 
