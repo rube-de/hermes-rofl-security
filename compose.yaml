@@ -153,6 +153,8 @@ services:
 
   hermes-dashboard:
     image: docker.io/nousresearch/hermes-agent:latest
+    # :latest is mutable and ROFL caches images, so force a fresh pull on redeploy.
+    pull_policy: always
     platform: linux/amd64
     restart: unless-stopped
     # Bind to all interfaces on the internal network with the auth gate OFF
@@ -206,6 +208,8 @@ services:
 
   hermes:
     image: docker.io/nousresearch/hermes-agent:latest
+    # :latest is mutable and ROFL caches images, so force a fresh pull on redeploy.
+    pull_policy: always
     platform: linux/amd64
     restart: unless-stopped
     depends_on:
