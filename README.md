@@ -14,7 +14,7 @@ Ethereum addresses can reach it. See "Dashboard access" below.
 | File                     | Origin              | Purpose                                                      |
 | ------------------------ | ------------------- | ------------------------------------------------------------ |
 | `rofl.yaml`              | `oasis rofl init`   | TEE manifest. Resources tuned to ~playground_short.          |
-| `compose.yaml`           | edited after init   | Default deployment — GLM + Akave + wallet-gated dashboard.   |
+| `compose.yaml`           | edited after init   | Default deployment — GLM + Akave + wallet-gated dashboards.  |
 | `compose-openrouter.yaml`| this repo           | Alternative deployment — Hermes against OpenRouter.          |
 | `.env.example`           | this repo           | Names of the secrets you must `secret import`.               |
 | `justfile`               | this repo           | Wrappers around the `oasis rofl ...` sequence.               |
@@ -27,10 +27,11 @@ drops the marker. On every subsequent boot it leaves `config.yaml` alone, so
 whatever the user (or Hermes itself) has put there — added auxiliary
 providers, swapped the model, configured skills — is the source of truth.
 
-They differ in one way: `compose.yaml` additionally runs a `hermes-dashboard`
-service with a `wallet-gateway` in front of it (see "Dashboard access" below),
-while `compose-openrouter.yaml` is Telegram-only. Switching to OpenRouter as-is
-therefore drops the web dashboard unless you port those two services across.
+They differ in one way: `compose.yaml` additionally runs two web dashboards —
+the stock `hermes-dashboard` and a `hermes-security-dashboard` — behind a single
+`wallet-gateway` (see "Dashboard access" below), while `compose-openrouter.yaml`
+is Telegram-only. Switching to OpenRouter as-is therefore drops the web
+dashboards unless you port those services across.
 
 ## Choosing a provider
 
@@ -144,14 +145,16 @@ running the bundle you built.
   Medium resource tier.
 - **One exposed port, wallet-gated (`compose.yaml`).** The `wallet-gateway`
   publishes port 8080 — the only inbound surface — and refuses anything without
-  a valid SIWE session from an allowlisted address. The dashboard (9119) and
-  Hermes' OpenAI-compatible Gateway API (8642) stay unpublished; the gateway is
-  the sole perimeter. `compose-openrouter.yaml` publishes nothing — Telegram is
-  outbound long-polling.
+  a valid SIWE session from an allowlisted address. It path-routes `/security/*`
+  to the security dashboard (3000) and everything else to the Hermes dashboard
+  (9119); both, plus Hermes' OpenAI-compatible Gateway API (8642), stay
+  unpublished, so the gateway is the sole perimeter. `compose-openrouter.yaml`
+  publishes nothing — Telegram is outbound long-polling.
 - **Pin images by digest for production.** The two `rclone` sidecars are already
   pinned (`rclone:1.69@sha256:…`), but the app images in `compose.yaml` —
-  `hermes`, `hermes-dashboard`, and the `wallet-gateway` — track floating
-  `:latest` tags for convenience. That's fine while iterating, but **in
+  `hermes`, `hermes-dashboard`, `hermes-security-dashboard`, and the
+  `wallet-gateway` — track floating `:latest` tags for convenience. That's fine
+  while iterating, but **in
   production pin each to a digest instead of a bare `:latest`**: the enclave
   identity is derived from the exact bundle, so a floating tag means the attested
   image can change under you and the build isn't reproducible. Resolve a digest
@@ -206,6 +209,10 @@ by the running container):
 - `.cache/**`, `.npm/**`, `node_modules/**` — package/tool caches
 - `__pycache__/**`, `*.pyc`, `.pytest_cache/**`, `.mypy_cache/**`,
   `.ruff_cache/**`, `.tox/**`, `.venv/**` — Python build artifacts
+- `security/live/**` — the security dashboard's live SQLite DB (`.db`/`-wal`/
+  `-shm`). Copying a live SQLite file with rclone is unsafe, so only its
+  point-in-time snapshot (`security/snapshot.db`, written via `VACUUM INTO`) is
+  synced; the dashboard rebuilds the live DB from it on boot.
 
   (Patterns are intentionally *unanchored* — `.cache/**`, not `**/.cache/**`.
   Hermes's HOME is the sync root `/opt/data`, so its caches sit at the root;
@@ -325,22 +332,28 @@ Filenames here are ciphertext (base32-encoded encrypted blobs).
 
 ## Dashboard access (wallet gateway)
 
-`compose.yaml` exposes Hermes' web dashboard — but never directly. Two services
-cooperate (`compose-openrouter.yaml` has neither):
+`compose.yaml` exposes two web dashboards — but never directly. Three services
+cooperate (`compose-openrouter.yaml` has none):
 
 - `hermes-dashboard` — the stock Hermes dashboard, run with `--insecure` (its
   own auth gate **off**) on `0.0.0.0:9119`. It has **no `ports:` entry**, so it
   is only reachable on the internal compose network, never from outside.
+- `hermes-security-dashboard` — the [security findings
+  dashboard](https://github.com/rube-de/hermes-security-dashboard) on
+  `0.0.0.0:3000`, also with **no `ports:` entry**. Its image bakes
+  `BASE_PATH=/security`, so it answers only under that prefix. See "Security
+  dashboard" below.
 - `wallet-gateway` — [a SIWE reverse
   proxy](https://github.com/rube-de/hermes-wallet-gateway) published on port
   8080. It verifies an Ethereum wallet signature (Sign-In-With-Ethereum), checks
   the address against an allowlist, issues an HMAC-signed session cookie, and
-  only then proxies traffic to `hermes-dashboard`. It is the sole inbound
-  perimeter.
+  only then proxies. It **path-routes** by URL prefix: `/security/*` to the
+  security dashboard, everything else to `hermes-dashboard`. One login covers
+  both (same origin). It is the sole inbound perimeter.
 
-Running the dashboard `--insecure` is safe **only** because of that shape — no
-published port of its own, gateway in front. Don't add a `ports:` entry to
-`hermes-dashboard`.
+Serving these dashboards without their own login is safe **only** because of
+that shape — no published port of their own, gateway in front. Don't add a
+`ports:` entry to either dashboard.
 
 ### Gateway settings
 
@@ -348,7 +361,8 @@ Baked into `compose.yaml` (part of the attested bundle, not secret):
 
 | Var | Value | Meaning |
 | --- | --- | --- |
-| `HERMES_TARGET` | `http://hermes-dashboard:9119` | upstream the gateway proxies to |
+| `HERMES_TARGET` | `http://hermes-dashboard:9119` | catch-all upstream (unmatched paths) |
+| `GATEWAY_ROUTES` | `{"/security":"http://hermes-security-dashboard:3000"}` | path-prefix → upstream routing table (JSON) |
 | `WALLET_CHAIN_ID` | `1` | chain SIWE verifies against |
 | `WALLET_SESSION_TTL` | `43200` | session lifetime in seconds (12h) |
 | `WALLET_STATEMENT` | `Sign in to the Hermes dashboard.` | text shown in the wallet sign prompt |
@@ -397,6 +411,41 @@ sync to Akave like everything else. Note: only `hermes` waits on
 `rclone-restore`; the dashboard may start against a not-yet-restored
 `/opt/data`, but it shares the live volume and picks state up as restore lands.
 
+### Security dashboard (`/security`)
+
+A separate [security findings
+dashboard](https://github.com/rube-de/hermes-security-dashboard) rides behind
+the same gate at `https://<domain>/security`. The `wallet-gateway` path-routes
+`/security/*` to it and forwards the path untouched — which is why it runs the
+`:latest-security` image tag (built with `BASE_PATH=/security` baked in). One
+SIWE login covers both dashboards; they share the gateway's origin and session.
+
+**Two trust surfaces.** The read UI (what you see in the browser) is wallet-gated
+like the Hermes dashboard. The **write API** — the endpoints a security-review
+cron pushes findings to — is guarded separately by a bearer token,
+`HERMES_API_TOKEN` (a ROFL secret). Set it: left empty, the dashboard accepts
+unauthenticated writes (and logs a loud warning). A logged-in human can't forge
+findings, because the SIWE session doesn't carry that token.
+
+**The cron pushes internally, not through the gate.** The gateway rejects any
+request without a SIWE session, so a headless cron can't push through port 8080.
+It must reach the dashboard directly on the compose network, and include the
+`/security` prefix (the base-path image 404s at the root):
+
+```
+POST http://hermes-security-dashboard:3000/security/api/repos
+Authorization: Bearer $HERMES_API_TOKEN
+```
+
+So the security-review job has to run on this machine's compose network (as a
+service here, or otherwise on the same Docker network) — not from outside.
+
+**Durability.** The dashboard keeps its SQLite DB in WAL mode under
+`security/live/` (excluded from sync) and emits a consistent `VACUUM INTO`
+snapshot at `security/snapshot.db` every `HERMES_SNAPSHOT_INTERVAL` seconds and
+on shutdown. Only that snapshot rides the Akave sync; on a fresh machine the
+dashboard restores the live DB from it before serving. See "Persistent storage".
+
 ## References
 
 - Hermes Docker — <https://hermes-agent.nousresearch.com/docs/user-guide/docker>
@@ -406,3 +455,4 @@ sync to Akave like everything else. Note: only `hermes` waits on
 - Akave Cloud / O3 — <https://docs.akave.xyz/>
 - rclone crypt — <https://rclone.org/crypt/>
 - Wallet gateway (SIWE) — <https://github.com/rube-de/hermes-wallet-gateway>
+- Security dashboard — <https://github.com/rube-de/hermes-security-dashboard>
