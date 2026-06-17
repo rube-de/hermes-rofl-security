@@ -34,8 +34,8 @@ deployments:
           min_tcb_evaluation_data_number: 18
           tdx: {}
       enclaves:
-        - id: yzrb82mY1IxuujVxsJ1s5HjmdElAxowt28wz3V2nGA8AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
-        - id: zUN/mrpKScBbV9bZojeLplrrpc1VRxfAeWifk5QxHIYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
+        - id: ceVuP2ya9ZCVqSbRxKXMcC+KlYSPjfWTGvpRJ3igoZUAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
+        - id: Eh7MCa/T9tbkZJ//3CRw5rdbEDvQf50S0zR1+3Z9p6MAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
       endorsements:
         - any: {}
       fees: endorsing_node
@@ -44,37 +44,39 @@ deployments:
       - name: OPENAI_API_KEY
         value: pGJwa1gg5RuVujq78mlRoOQmhZKUy9tqcYSa1SCFbY5lwFXQFDlkbmFtZVgeJbbESh4gQbKO7Pgu5Z6U+XXAWLJcmNFLl3OxatsHZW5vbmNlT7g/jB8G1SOULqA74yu0OGV2YWx1ZVhBS04ZL9uVKGsg/ZUK/aR/X2IBWNIeCmPfdDxq28MaJVarGs6K7EPMTqjt3CElg4iPBqpaluHov0dZ/+vZLKeLBMw=
       - name: TELEGRAM_ALLOWED_USERS
-        value: pGJwa1gg0jRTscfxunA17SGwJGd5nxqmold+8pjJaihzm8pK4lJkbmFtZVgmUsBCc6GzHG5USLRi1vayhNEy9G+b5CMpIfvhvBddOrAQsF93Hq5lbm9uY2VP6aldRzES1peX2A1+zzNPZXZhbHVlWBrh+oNL2NKk6MCGPlMqmezA2R+zBSlSmMaLUA==
+        value: pGJwa1ggp/qo1zAnbEQuX1HfzYMa6KfxV8w7yC7q59A/Esl3cURkbmFtZVgmQM++Y30ag35jsmzJkqcQwqtuv8VFEclfdHp832tLpvMMLgM61r9lbm9uY2VPdVDQ9LYezUn7XaOuZVCQZXZhbHVlWBpqjeJ4G744fBGaNLNpGtxMDUra3SvTeEw1mg==
       - name: TELEGRAM_BOT_TOKEN
-        value: pGJwa1ggIi6oiBZRox7wXYZ4igu+iBLOo7/FXgXhNSFcHZgnTTBkbmFtZVgiMAIyOXv6ig/mLR0WRUhh2FjnWyKdV0oD5fICwOWxc2whgmVub25jZU8PSMrlWe7aszB/GNHKNtBldmFsdWVYPn4BWEEqpzdZoSQ2oj56ZScJItdklF5vjN5CW/gOs5ux5tOjoCmVld2tbrWzVHWebxxH7W667s5pVjkYqSPs
+        value: pGJwa1ggudNAwAdT0GvOglJwM8aTdXSTlxfbeVg0UWWBgDNwbE9kbmFtZVgi9X7E79AjZu0u9RP8tSVdzjpAj1YA8q9v7K6L6kwnxd+xZmVub25jZU/AiI7N7Gd9Aj+MKSFgxclldmFsdWVYPhACs3bk6kra4PiUwfKk/e7EhpK2/HomUNj97lUJl7byjkk2O54g+AZ5crCNfm0HuIgawZfCU58z8ixGCwCe
       - name: TELEGRAM_GROUP_ALLOWED_CHATS
-        value: pGJwa1ggrxU7tMuhAnkpx6K9sKn8xb2G5et9Fhh00hma7OOhIhRkbmFtZVgsevWoY1uIk+1Tq4Wl805kcd/SoaHKKdbiAh7Arzg7mgUn3Rr/Du23Ef6L+K5lbm9uY2VPHfTBR/1Fe/GsmqpvEjCQZXZhbHVlWB5oWAC6ImZ6H3zYScqb2Soh2VJplZ31eEP8LeNDd3o=
+        value: pGJwa1ggHg7s4kgRJHn434aGc3CNqLvrz1c+t/piesDnn8/SJktkbmFtZVgs280XuCGCFVUl9czWkbskgjjnc7M8D1zfwXSN62l/T89UsRUPILvkIwxH4lZlbm9uY2VPfh9n2s4j1enPVhumL8IaZXZhbHVlWB7+t74QbC046zEZ9CBXYRuBJPCpcMfDYAp9B2aU4G8=
       - name: GLM_API_KEY
-        value: pGJwa1ggl5neg6tW29sw2a6xtmMLST3W7bkkESEGfap/YhcpAH1kbmFtZVgbGnN4jxWrzs4F4MUR8XTR7/gviqEsH5DM4d7NZW5vbmNlT72UA6I3eHMfli6Q0WI8SmV2YWx1ZVhBakyySlj2Gdae0W1izSQxa7d0l7bR4f0EXjPMmH3UyGHCKEdSfkI1UynrVtiHIhaBbfQzOOHOvosfoO0L7avN3N0=
+        value: pGJwa1ggbvqrxupL0CHi7tR3bntYN8gAFIN1f7/qovKkOgU6cltkbmFtZVgbR5Gfu0WV4peHUXx5uZvLZypsex/ceaYOuvbxZW5vbmNlTwInC4uKGt29AsSeVvRyimV2YWx1ZVhBoG8AOnQmxIIhqoD1yKbCeu6hDaJNjRIVdNZ58nwMTFtIPwSnVxmsRUgIwXjE7L5oNT2JAyooofZ52iFMcv8PRaE=
       - name: AKAVE_ACCESS_KEY
-        value: pGJwa1ggQqzc9B++ilU8L4kZC6cRdAIlwSJo4EL6kVoysZJeczZkbmFtZVggjmY5fq3IBII2ZbGayCzvoOKabsjEeFQiaeHCKD5iNFFlbm9uY2VPlAoS9CVQQO4u9EoJ1yDiZXZhbHVlWCTEycwGr3MgZeqdZvLaM82RexawWE+HqCaP9wlVkT22SQHAkWk=
+        value: pGJwa1gg9yW3kJ0pt2mzKCv1K/GiJvX/bcZcrj6Y8D/sHLCm2FFkbmFtZVggmV73ggEB/KlE7TDw6I+0gI2UrX6Zbj/0J334CnNwOXVlbm9uY2VPhUHV+mxAHahNYvCylNANZXZhbHVlWCTPqzNMWg12aFUvxA95fG6mEkd8ztFGvDo4s18C5xvVVHdCW9A=
       - name: AKAVE_BUCKET
-        value: pGJwa1ggn+jdJot3VWw0cb+eDQxXhxa1Qk6hNV2KqIIdHdakxCRkbmFtZVgcNYGf5Z8vLqUHWTrbs9GhRbvq4b5+xD08w3uBumVub25jZU+4glSnebaVuyIXAONldolldmFsdWVYGnohr4Se0aHEAfvof5USfXGmaA7whfCOz6fi
+        value: pGJwa1ggALkk+N/H0FZXFJlEDyXSpA2zqWJg6wB6IcvjwKP7BTpkbmFtZVgcu0/bu3Z9EKH/snemD4W1rX2halk0oPEafshz+WVub25jZU91ftAI9t7oDvzeWHWgDzBldmFsdWVYGqWa8YAg/oapGNlpD0vs1YFTppLy0CeTPB45
       - name: AKAVE_ENDPOINT
-        value: pGJwa1ggKmUiEwyk7NP3WOYaZszjlC0yjdSanT59nO31wzLGR2lkbmFtZVge0G6pdpRolBx9DUJ9+/AEPMB22uV0zpQlg1pSQb8/ZW5vbmNlTzpMH9kz3DTDiqy7zfeRyWV2YWx1ZVggQiNGg4vgOO7bD9pWUdX9Zq7j9MnnONTR2Qao7uY74cM=
+        value: pGJwa1ggPVfkDYt0sRonhpj6U9kTVA1SuyoidBY21WlYfA5rmj9kbmFtZVgeo6fyUr42lf8peo0lnjRLAUCOG/fH+ck9394qsaYbZW5vbmNlT6zR45Zy0dW0vQvS73tlM2V2YWx1ZVggVaLYC7sSZ/14Czd3uywEGT1MHV6b5FnVLVJl91v8erk=
       - name: AKAVE_SECRET_KEY
-        value: pGJwa1gg5xr5FcGSRmfpYl5aJysDGMPjSytnN4z9xAlHRF1QLhNkbmFtZVggOMr/3fcyKFVnV/AlRfr3ddFB1nfEcoOmvG+y5eI7COplbm9uY2VPw3LJ66eKGYpKmT8ScutgZXZhbHVlWDZfTa/BY1G2OjYX40QFJzA/Vdg2o9YzHrncbkw6GUYPBkdoFxds1D4nxxonRXorCxgW/yEc2sA=
+        value: pGJwa1ggAyKWPTUHrLPLAzT1x+mDaLL7rwhEAwK0NbxVPeWV11NkbmFtZVggapnkxy7TRML9juXQDCpuNyFU9+eyyUJiOBKOPoQ6vDhlbm9uY2VPbGP1AX18ve9xw8DKqp6BZXZhbHVlWDZSkc12H0+7VDt0PKyZYkCclSEkZGO2dJgj661r2KCQAUEQGdV2Av+w5gq+74sX9PMmtmVsQk0=
       - name: RCLONE_CRYPT_PASSWORD
-        value: pGJwa1ggeg8LZr0xWZoJvplMzyocpqD1lNcFybeprshPSe6SHwZkbmFtZVglJpHHcRJV6bg5xaRnUvVzu9tKeg+42FPG02TEWO5PYAWnyy4kEmVub25jZU95IcIgr9P/lTbjOO4EjVBldmFsdWVYe+sMQrMzKxbG5Re8r+zdtqeioOgEmTF8e0KtLA9Osd/UOxi5u+sfslOZMYMwjXe54Ox97IYX3DFhV834q83HrkZwW+hODfFb9L/kblpj2H+sUiJJff87unoSLUTHHfDWIBSh6Ly1EPW8X8pVxjiXUlxo1WvN3D6lbavEpg==
+        value: pGJwa1ggXY5gP+P5IwdEB95Hb4diCayiAP7MKmMoney4F5wvRVBkbmFtZVglsTBwe+59RHJjJxRzoAQizVofX/o0C42o5X+kHnsGl1OC8MKDVGVub25jZU9Y1ksrms8i9xswGYi3Vr9ldmFsdWVYe/2ibHj5hXRa9MEF8dd0PAtpxbu01tmBuwQR4J1X+KbsAFC0CsxrXbypudkjVzOzgpxKrmE6xYpIFrOj39fG00Cll9AMC6i16UcnrOqYo/H4WZWk74AdBMXQWguzo4xYnPdn9gGyfWLJ6X8Wm/YRkjeK5rygGvqxdAm0xQ==
       - name: RCLONE_CRYPT_SALT
-        value: pGJwa1gg4dI26lPzaUbMcl8YJ8o+B4eq4DbZnkG+xt+Zzo07cEtkbmFtZVghw4UpVnA+ueavHr9nW3dNvwvBVNKuLdKRsxJP5tp2xx16ZW5vbmNlT8klaVDlVlxOy+FKku50bGV2YWx1ZVhgLjPz4B18EZk+4IMc7d+9+e3qrLHX+CU2sKseUMR8+z9tJPF6y800T2lQJ4O8qiwlO0t1YV8/u7i6sS9yNPco3CvQYZSScthdPD8MtcWpe8RX7l8pHudTKZK295qV8Sft
+        value: pGJwa1gg419U8NlHnF8F4kgzvkshdFJ8d0GkIzt+lIIIrb97wkJkbmFtZVghwFV7n99Moa1vhxXBjwA+TTTmWCfXEQtok+TnP3Drf5z1ZW5vbmNlT3vLUfvyniOaZBbwq83iYmV2YWx1ZVhglv7O4QkQvakiQ+nStoRPrMKKPHPfUg8wmvpf++ALnhdePgdSYE0awO3I4eysOYomPHJRMTpYS0YVVdENF2eg569y57ud97XgEa7ilWWaiA6bFeyFEVgHNL0Qu2MAG5vJ
       - name: SYNC_INTERVAL
-        value: pGJwa1ggBLZY4G7kq9hmTJsFxO3/29j/zlYiPRPCes7ZbNAT+itkbmFtZVgd/5NShS7xTqTkkjc4UEwGM56gJAS6OP/e1wwnYwllbm9uY2VPDuO63dhoUQk/QEliJem8ZXZhbHVlU4XANhFRxjGwo9s5GTEXsnQW0D4=
+        value: pGJwa1ggUqcywSj8p2uAs+Yd9duiU7CoNT4c+O1R588PgNLR71pkbmFtZVgd1xjxZtjeqrb1QyGTCFzgL/Q7MKlntQ8DcSPG2bBlbm9uY2VPK9pW1MgcY9JePRwfeSUuZXZhbHVlUxxqlBE3L1w+iqZ01t8XbgBhfJ8=
       - name: WALLET_DOMAIN
-        value: pGJwa1ggBkhgYA7rUaAPK7gwwFiMN+2+ePc0fd13QeQLaEgMM1tkbmFtZVgdk3gp+WIeLbQWVFACNC8Jw2xlVuZ8+SWo3Kxm16tlbm9uY2VPIkphqDCPLY7WkeuOqIuzZXZhbHVlWDGS7hj27oT6kkPw2nrjbc2s0PkihUjC4G/K6gHFGpi7k+kplUuxAuf3bxvkWjkrbECx
+        value: pGJwa1ggGeKCHCjrH/NNbY5Lgm4U7gyiiasyaVDgEzpllRr3whVkbmFtZVgdQNzxYUzsaeZ1KDui6TzRzS+kcIfQIE7aS6FUbgZlbm9uY2VPUT0kuQnzclLnjAv9VidSZXZhbHVlWDFQDe6BmfmDlqqjRSGPyuOioJ+QeGTHiziPcNEP2zFP+yOUS53AEIrYJV0KEw26ImKT
       - name: WALLET_SESSION_SECRET
-        value: pGJwa1ggzo29axv6gCvSibDXS6mxk/JZAxn/YdwD0g2bNvl3tA5kbmFtZVgl0cz9AvjYkxEfSAla3SM2fi++JaoTLB5Qz2QwC1G9UNijRwpvQ2Vub25jZU/FQStEetUqduGXeS43o4dldmFsdWVYUCCizi4xYVsLxz+rukxpBVvLGPdaBrCnr+Nl9fJkYzXZKe64n6Vsxc62lq6e9yhxfsitHb7mwQw+HYs1PVrEP1juem290EotN2rAlz+casOc
+        value: pGJwa1ggoKiawZZXOeOkoHPNbcq8tavsQGKF7tNb0Nl/V0IHpgxkbmFtZVgllNUoB8JPvJedbubrV2CEifZTFrLbG8lED3kKWInL7sMGGvW312Vub25jZU+KkQM6bY8Pm64B3fuDX4BldmFsdWVYUOg19rTezBrb9jNqn6+45BjUdJ/zPDsM7el8c0EkCi1C4qkVr1NoyJmllqWEmmjJGStnoZ/B1a21s4cm++oOgH+6XJKZLF7GFAjcZ73dt+qT
       - name: WALLET_WHITELIST
-        value: pGJwa1ggtTYSaiSBOE3xrNnyua7eznzgekJ/IlXBSzcrJ+S6hC5kbmFtZVgg5Yc21LAsXMuLvcvgcvgbWo3uItC1xieBjLMXvjvoDi5lbm9uY2VPsp9A5rN6RDoc2k8jhAMnZXZhbHVlWGUayFU6Dg2rbm3RkNtoEw0KsdeOTXfUzGdUwWuIs5Kse/SkHZ1eBhT0aQqWuKDLK0Kh5yX6KUvechS6bF2n7e6aojWi6Ap7liRt8sEhWCnjPzDOwhwYZJJpTPA3tfqxUIytPOUEsw==
+        value: pGJwa1ggREl92iPC/zbFhfVQJtHfePtvDz2maoa157Ni53uHlg1kbmFtZVggY4An/NTFy9gwsW9RLSsWluN/OoeCMq8DatgASMARCVNlbm9uY2VPXv23EuPNb6G870qGNE0xZXZhbHVlWGUtqG7hnCZzMt8UN/v6Uqr9w57+0GwbDWW8P7ySYGlzwywLNPhdN3yexCWmv55GjBC/HOFALXOjsaHA91MDdcd6F5SRwcidZHnZfLi/CLb1a/S9FV3s3Ho0K4kcbB0OJCt+E8UfpA==
       - name: WALLET_CHAIN_ID
-        value: pGJwa1gg8UaaYcPVgG2nKKKu/zb1E5H5xq0cAtNpXbf0tKX93m9kbmFtZVgfxyvxXR4p+8xbX0/dInI/xMYhQo7Qh8uHk9qoemrq0WVub25jZU/REFYkykqHVnxHf+JECW9ldmFsdWVRIqkYhyv/kuhYenpWxB1YSJE=
+        value: pGJwa1gg7OM+wiK33r9oMeklBubHONH+dgNCWc5dQoR0AkyLRn9kbmFtZVgfyp3Xim2IiR2QPGDnku4ERmhcQenxGr9IXmR7TbdLAWVub25jZU9SVn2XXckbHTkQhSd7orlldmFsdWVRb7oWWhFdPgOqUD+E95A19yY=
       - name: WALLET_WC_PROJECT_ID
-        value: pGJwa1gg6ZqQJH/7idQsCPOGuuUlv6A6LafXMxK2QJLtMvs9rShkbmFtZVgkTj5bdz0k2twxYp6KcsfgmSZsRnygwoWl+mPpObSUlCjrnYTJZW5vbmNlT6xHsKgzkIAW9Zzmw3X8DmV2YWx1ZVgwAWaMJ/EXuimAsvF0PS+0cT0nUHz7/VTiDmETK62fU87ajWvg25LcPUhc0nBOkc2t
+        value: pGJwa1ggpV2Vkvhb4Jpe1DJ8NmSmqGPMSb7qMjsoq8dDVMwrik1kbmFtZVgkv7AqEgWBIj9q783SeRlOPwB3ehIjJ3PKV9R6VJvBHImoVFmmZW5vbmNlTyeJhVFns0fh8a/ZFFXBN2V2YWx1ZVgwx6RKMcoqVukE5Ixd15VTdbKSNy15P6bP5anaETA4bNv+CRtbDjR8NQ/cQMJsnFTw
+      - name: HERMES_API_TOKEN
+        value: pGJwa1ggl6aEfVBQjAtRQAhcHNUqw07U7ml/pUeCIyOlE/sWUw9kbmFtZVgg8qjDIfwKZLNR26U9RvDwoXJc/99VofrA5qoNBuUBDUdlbm9uY2VPCNUH4Wfn2W8tVtTRt1rDZXZhbHVlWFD0nRQ8jijPf4xryASq3T+FZyvWNhh2htbj7O3zrYHGi6xuMXxqCMpMJHMQFrhCJlggoDX7MFuz3GtjM9PnkG3QcLLCMWsQHjDXQzQweXDiKw==
     machines:
       default:
         provider: oasis1qp2ens0hsp7gh23wajxa4hpetkdek3swyyulyrmz
