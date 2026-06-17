@@ -125,6 +125,8 @@ services:
     # SIWE wallet gate: https://github.com/rube-de/hermes-wallet-gateway
     # Use the published image or build your own (see that repo).
     image: ghcr.io/rube-de/hermes-wallet-gateway:latest
+    # :latest is mutable and ROFL caches images, so force a fresh pull on redeploy.
+    pull_policy: always
     restart: unless-stopped
     depends_on:
       - hermes-dashboard
@@ -181,6 +183,8 @@ services:
     # No `ports:` — like hermes-dashboard, the gateway is the sole perimeter;
     # reachable internally at http://hermes-security-dashboard:3000.
     image: ghcr.io/rube-de/hermes-security-dashboard:latest-security
+    # :latest-security is mutable and ROFL caches images, so force a fresh pull on redeploy.
+    pull_policy: always
     platform: linux/amd64
     restart: unless-stopped
     depends_on:
