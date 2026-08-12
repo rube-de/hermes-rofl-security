@@ -70,6 +70,14 @@ services:
         run_sync() {
           echo "[sync] cycle starting at $$(date -u +%FT%TZ)"
           start=$$(date +%s)
+          # NOTE: no comments inside the continued command below — a `#` after a
+          # backslash-continuation ends the command and turns the remaining
+          # --exclude lines into a separate, bogus one (rc=127).
+          #
+          # db-snapshots/** is db-snapshot's VACUUM output: restic archives it,
+          # rclone must not. The ~300 MB state.db snapshot is rewritten every
+          # cycle, so syncing it would re-upload ~300 MB per rclone cycle to the
+          # very bucket this migration exists to stop paying for.
           if rclone sync /sync crypt: \
                --update --delete-during \
                --exclude=logs/** \
@@ -84,10 +92,6 @@ services:
                --exclude=.tox/** \
                --exclude=.venv/** \
                --exclude=security/live/** \
-               # db-snapshot's VACUUM output. restic archives these; rclone must
-               # NOT — the ~300 MB state.db snapshot is rewritten every cycle, so
-               # syncing it would re-upload ~300 MB per rclone cycle to the very
-               # bucket this migration exists to stop paying for.
                --exclude=db-snapshots/** \
                --exclude=gateway_state.json \
                --exclude=gateway.pid \
