@@ -16,8 +16,17 @@ services:
           echo "[restore] FATAL: cannot access crypt: $$listing" >&2
           exit 1
         fi
+        # Sentinel the other services block on. Written only on a path where the
+        # volume is known-good, so a restore FATAL leaves it absent and every
+        # waiter stays parked rather than acting on half-restored data.
+        mark_done() {
+          date -u +%FT%TZ > /sync/.restore-complete
+          echo "[restore] sentinel written: /sync/.restore-complete"
+        }
+
         if [ -z "$$listing" ]; then
           echo "[restore] remote is empty (first-ever deployment), nothing to restore"
+          mark_done
           exit 0
         fi
         echo "[restore] copying crypt: -> /sync"
@@ -28,6 +37,7 @@ services:
         count=$$(find /sync -type f | wc -l)
         size=$$(du -sh /sync | awk '{print $$1}')
         echo "[restore] complete: $$count files, $$size"
+        mark_done
     environment:
       - HOME=/tmp
       - RCLONE_CONFIG_AKAVE_TYPE=s3
@@ -296,6 +306,30 @@ services:
     command:
       - -c
       - |
+        wait_for_restore() {
+          marker=/data/.restore-complete
+          boot=$$(( $$(date +%s) - $$(cut -d. -f1 /proc/uptime) ))
+          waited=0
+          while :; do
+            mt=$$(stat -c %Y "$$marker" 2>/dev/null || echo 0)
+            if [ "$$mt" -ge "$$boot" ] 2>/dev/null; then
+              echo "[cache-prune] restore sentinel is fresh, proceeding"
+              return 0
+            fi
+            if [ "$$waited" -ge 1800 ]; then
+              echo "[cache-prune] WARN: no restore sentinel after 30m, skipping prune" >&2
+              return 1
+            fi
+            [ $$(( waited % 60 )) -eq 0 ] && \
+              echo "[cache-prune] waiting for rclone-restore to finish ($${waited}s)"
+            sleep 5; waited=$$(( waited + 5 ))
+          done
+        }
+
+        if ! wait_for_restore; then
+          exit 0
+        fi
+
         echo "[cache-prune] before:"; df -h /data
         rm -rf \
           /data/home/.local/share/pnpm \
@@ -356,8 +390,17 @@ services:
           echo "$$snaps" >&2
           exit 1
         fi
+        # Same sentinel rclone-restore publishes: written only where the volume
+        # is known-good, so a failure parks every waiter instead of letting them
+        # act on half-restored data. At cutover this becomes the only writer.
+        mark_done() {
+          date -u +%FT%TZ > /opt/data/.restore-complete
+          echo "[restic-restore] sentinel written: /opt/data/.restore-complete"
+        }
+
         if [ "$$(printf '%s' "$$snaps" | tr -d '[:space:]')" = "[]" ]; then
           echo "[restic-restore] repository is empty (first-ever deployment), nothing to restore"
+          mark_done
           exit 0
         fi
 
@@ -371,6 +414,7 @@ services:
         count=$$(find /opt/data -type f | wc -l)
         size=$$(du -sh /opt/data | awk '{print $$1}')
         echo "[restic-restore] complete: $$count files, $$size"
+        mark_done
     environment:
       - HOME=/tmp
       - RESTIC_CACHE_DIR=/tmp/restic-cache
@@ -430,12 +474,14 @@ services:
             skip = {out, root / "security" / "live"}
             out.mkdir(parents=True, exist_ok=True)
             found = failed = 0
+            expected = set()
             for db in sorted(root.rglob("*.db")):
                 if set(db.parents) & skip:
                     continue
                 found += 1
                 dest = out / db.relative_to(root).as_posix().replace("/", "__")
                 tmp = dest.with_name(dest.name + ".tmp")
+                expected.add(dest.name)
                 try:
                     start = time.time()
                     con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=60)
@@ -453,9 +499,45 @@ services:
                     failed += 1
                     tmp.unlink(missing_ok=True)
                     print(f"[db-snapshot] WARN: {db}: {exc}", file=sys.stderr)
-            print(f"[db-snapshot] cycle complete: {found} databases, {failed} failed")
+            # Drop snapshots whose source database is gone. Without this a
+            # renamed or deleted database leaves its copy here forever, and this
+            # directory is on the same disk as everything else.
+            removed = 0
+            for stale in out.iterdir():
+                if stale.is_file() and stale.name not in expected:
+                    stale.unlink(missing_ok=True)
+                    removed += 1
+                    print(f"[db-snapshot] removed orphaned snapshot {stale.name}")
+            total = sum(f.stat().st_size for f in out.iterdir() if f.is_file())
+            print(f"[db-snapshot] cycle complete: {found} databases, {failed} failed, "
+                  f"{removed} orphaned removed, {total / 1048576:.1f} MiB on disk")
+
+        def wait_for_restore():
+            # Same rule as the shell services: the sentinel counts only if it was
+            # written since the current kernel boot, so a marker left on the
+            # persistent volume by a previous boot cannot wave us through onto a
+            # volume that is still being restored.
+            marker = root / ".restore-complete"
+            with open("/proc/uptime") as fh:
+                boot = time.time() - float(fh.read().split()[0])
+            waited = 0
+            while not stopping:
+                try:
+                    if marker.stat().st_mtime >= boot:
+                        print("[db-snapshot] restore sentinel is fresh, proceeding")
+                        return True
+                except FileNotFoundError:
+                    pass
+                if waited % 60 == 0:
+                    print(f"[db-snapshot] waiting for rclone-restore to finish ({waited}s)")
+                time.sleep(5)
+                waited += 5
+            return False
 
         print(f"[db-snapshot] loop starting, interval={interval}s")
+        if not wait_for_restore():
+            print("[db-snapshot] exiting before first cycle")
+            raise SystemExit(0)
         while not stopping:
             cycle()
             if stopping:
@@ -485,6 +567,26 @@ services:
       - |
         set -u
         INTERVAL=$${BACKUP_INTERVAL:-3600}
+
+        wait_for_restore() {
+          marker=/opt/data/.restore-complete
+          boot=$$(( $$(date +%s) - $$(cut -d. -f1 /proc/uptime) ))
+          waited=0
+          while :; do
+            mt=$$(stat -c %Y "$$marker" 2>/dev/null || echo 0)
+            if [ "$$mt" -ge "$$boot" ] 2>/dev/null; then
+              echo "[backup] restore sentinel is fresh, proceeding"
+              return 0
+            fi
+            
+            [ $$(( waited % 60 )) -eq 0 ] && \
+              echo "[backup] waiting for rclone-restore to finish ($${waited}s)"
+            sleep 5; waited=$$(( waited + 5 ))
+          done
+        }
+
+        wait_for_restore
+
         PRUNE_EVERY=$${PRUNE_EVERY_CYCLES:-24}
 
         # Written here rather than mounted: this compose file uses no bind
@@ -533,6 +635,8 @@ services:
         /opt/data/*.db-wal
         /opt/data/*.db-shm
         /opt/data/db-snapshots/*.tmp
+        # Boot sentinel: local coordination state, never restored.
+        /opt/data/.restore-complete
         # Generic build and virtualenv noise, at any depth.
         **/node_modules
         **/__pycache__
