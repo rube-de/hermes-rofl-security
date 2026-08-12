@@ -9,6 +9,8 @@ services:
       - -c
       - |
         set -eu
+        trace() { echo "$$(date -u +%FT%TZ) rclone-restore $$1" >> /sync/.boot-trace 2>/dev/null || true; }
+        trace start
         echo "[restore] starting at $$(date -u +%FT%TZ)"
         echo "[diag] df:"; df -h /sync
         echo "[diag] top dirs:"; du -sh /sync/* 2>/dev/null | sort -rh | head -20
@@ -21,6 +23,7 @@ services:
         # waiter stays parked rather than acting on half-restored data.
         mark_done() {
           date -u +%FT%TZ > /sync/.restore-complete
+          trace sentinel-written
           echo "[restore] sentinel written: /sync/.restore-complete"
         }
 
@@ -304,6 +307,8 @@ services:
     command:
       - -c
       - |
+        trace() { echo "$$(date -u +%FT%TZ) cache-prune    $$1" >> /data/.boot-trace 2>/dev/null || true; }
+        trace start
         wait_for_restore() {
           marker=/data/.restore-complete
           boot=$$(( $$(date +%s) - $$(cut -d. -f1 /proc/uptime) ))
@@ -311,6 +316,7 @@ services:
           while :; do
             mt=$$(stat -c %Y "$$marker" 2>/dev/null || echo 0)
             if [ "$$mt" -ge "$$boot" ] 2>/dev/null; then
+              trace "proceeded after $${waited}s"
               echo "[cache-prune] restore sentinel is fresh, proceeding"
               return 0
             fi
@@ -528,6 +534,17 @@ services:
             print(f"[db-snapshot] cycle complete: {found} databases, {failed} failed, "
                   f"{removed} orphaned removed, {total / 1048576:.1f} MiB on disk")
 
+        def trace(event):
+            # Mirrors the shell services: ROFL captures stdout from only some
+            # containers, so ordering is recorded on the volume where restic
+            # archives it and `restic dump` can read it back.
+            try:
+                with open(root / ".boot-trace", "a") as fh:
+                    fh.write(f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} "
+                             f"db-snapshot    {event}\n")
+            except Exception:
+                pass
+
         def wait_for_restore():
             # Same rule as the shell services: the sentinel counts only if it was
             # written since the current kernel boot, so a marker left on the
@@ -540,6 +557,7 @@ services:
             while not stopping:
                 try:
                     if marker.stat().st_mtime >= boot:
+                        trace(f"proceeded after {waited}s")
                         print("[db-snapshot] restore sentinel is fresh, proceeding")
                         return True
                 except FileNotFoundError:
@@ -550,6 +568,7 @@ services:
                 waited += 5
             return False
 
+        trace("start")
         print(f"[db-snapshot] loop starting, interval={interval}s")
         if not wait_for_restore():
             print("[db-snapshot] exiting before first cycle")
@@ -584,6 +603,8 @@ services:
         set -u
         INTERVAL=$${BACKUP_INTERVAL:-3600}
 
+        trace() { echo "$$(date -u +%FT%TZ) restic-backup  $$1" >> /opt/data/.boot-trace 2>/dev/null || true; }
+        trace start
         wait_for_restore() {
           marker=/opt/data/.restore-complete
           boot=$$(( $$(date +%s) - $$(cut -d. -f1 /proc/uptime) ))
@@ -591,6 +612,7 @@ services:
           while :; do
             mt=$$(stat -c %Y "$$marker" 2>/dev/null || echo 0)
             if [ "$$mt" -ge "$$boot" ] 2>/dev/null; then
+              trace "proceeded after $${waited}s"
               echo "[backup] restore sentinel is fresh, proceeding"
               return 0
             fi
