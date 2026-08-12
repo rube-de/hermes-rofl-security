@@ -10,6 +10,8 @@ services:
       - |
         set -eu
         echo "[restore] starting at $$(date -u +%FT%TZ)"
+        echo "[diag] df:"; df -h /sync
+        echo "[diag] top dirs:"; du -sh /sync/* 2>/dev/null | sort -rh | head -20
         if ! listing=$$(rclone lsf crypt: 2>&1); then
           echo "[restore] FATAL: cannot access crypt: $$listing" >&2
           exit 1
@@ -82,6 +84,16 @@ services:
                --exclude=.tox/** \
                --exclude=.venv/** \
                --exclude=security/live/** \
+               # db-snapshot's VACUUM output. restic archives these; rclone must
+               # NOT — the ~300 MB state.db snapshot is rewritten every cycle, so
+               # syncing it would re-upload ~300 MB per rclone cycle to the very
+               # bucket this migration exists to stop paying for.
+               --exclude=db-snapshots/** \
+               --exclude=gateway_state.json \
+               --exclude=gateway.pid \
+               --exclude=gateway.lock \
+               --exclude=cron.pid \
+               --exclude=processes.json \
                --log-level INFO --stats 0; then
             elapsed=$$(( $$(date +%s) - start ))
             echo "[sync] cycle complete in $${elapsed}s"
@@ -125,8 +137,6 @@ services:
     # SIWE wallet gate: https://github.com/rube-de/hermes-wallet-gateway
     # Use the published image or build your own (see that repo).
     image: ghcr.io/rube-de/hermes-wallet-gateway:latest
-    # :latest is mutable and ROFL caches images, so force a fresh pull on redeploy.
-    pull_policy: always
     restart: unless-stopped
     depends_on:
       - hermes-dashboard
@@ -152,14 +162,24 @@ services:
       - WALLET_DOMAIN=${WALLET_DOMAIN}
 
   hermes-dashboard:
-    image: docker.io/nousresearch/hermes-agent:latest
-    # :latest is mutable and ROFL caches images, so force a fresh pull on redeploy.
-    pull_policy: always
+    # Pinned to v0.20.0 — bump deliberately, don't float on :latest (mutable
+    # tags + pull_policy: always filled the machine's disk on every restart).
+    image: docker.io/nousresearch/hermes-agent:v2026.8.3@sha256:16788311e2fa3035456bdc1bafb8ec2b1777db64ebf020af9bb7eb73c3712c9e
     platform: linux/amd64
     restart: unless-stopped
-    # Bind to all interfaces on the internal network with the auth gate OFF
-    # (--insecure). Safe ONLY because there is no `ports:` entry -> not publicly
-    # reachable; the wallet-gateway is the sole perimeter and enforces auth.
+    # Gated on the restore like its siblings. It briefly was not: rclone-restore
+    # used to FATAL on broken Akave credentials and would have blocked the
+    # dashboard from ever starting. Those credentials work again
+    # (`just test-akave --read-only` passes), so the exception is gone.
+    # Failing closed is the correct behaviour anyway — serving the dashboard off
+    # an unrestored volume shows an empty agent as if it were real.
+    depends_on:
+      rclone-restore:
+        condition: service_completed_successfully
+      cache-prune:
+        condition: service_completed_successfully
+    # Bind to all interfaces on the internal network. Hermes requires its own
+    # auth provider for non-loopback binds, in addition to the wallet gateway.
     command:
       [
         "dashboard",
@@ -167,7 +187,6 @@ services:
         "0.0.0.0",
         "--port",
         "9119",
-        "--insecure",
         "--no-open",
         "--skip-build",
       ]
@@ -176,6 +195,9 @@ services:
     environment:
       - HERMES_UID=10000
       - HERMES_GID=10000
+      - HERMES_DASHBOARD_BASIC_AUTH_USERNAME=${HERMES_DASHBOARD_BASIC_AUTH_USERNAME}
+      - HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH=${HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH}
+      - HERMES_DASHBOARD_BASIC_AUTH_SECRET=${HERMES_DASHBOARD_BASIC_AUTH_SECRET}
 
   hermes-security-dashboard:
     # SIWE-gated security findings dashboard, served under /security by the
@@ -185,12 +207,12 @@ services:
     # No `ports:` — like hermes-dashboard, the gateway is the sole perimeter;
     # reachable internally at http://hermes-security-dashboard:3000.
     image: ghcr.io/rube-de/hermes-security-dashboard:latest-security
-    # :latest-security is mutable and ROFL caches images, so force a fresh pull on redeploy.
-    pull_policy: always
     platform: linux/amd64
     restart: unless-stopped
     depends_on:
       rclone-restore:
+        condition: service_completed_successfully
+      cache-prune:
         condition: service_completed_successfully
     environment:
       # Live WAL DB is isolated under security/live/ (excluded from sync); only
@@ -207,13 +229,14 @@ services:
       - hermes-data:/data
 
   hermes:
-    image: docker.io/nousresearch/hermes-agent:latest
-    # :latest is mutable and ROFL caches images, so force a fresh pull on redeploy.
-    pull_policy: always
+    # Pinned to v0.20.0 — see hermes-dashboard for why we stopped floating on :latest.
+    image: docker.io/nousresearch/hermes-agent:v2026.8.3@sha256:16788311e2fa3035456bdc1bafb8ec2b1777db64ebf020af9bb7eb73c3712c9e
     platform: linux/amd64
     restart: unless-stopped
     depends_on:
       rclone-restore:
+        condition: service_completed_successfully
+      cache-prune:
         condition: service_completed_successfully
     command:
       - sh
@@ -241,6 +264,351 @@ services:
       - HERMES_API_TOKEN=${HERMES_API_TOKEN}
       - HERMES_UID=10000
       - HERMES_GID=10000
+    volumes:
+      - hermes-data:/opt/data
+
+  # Runs every boot, before hermes/hermes-dashboard start pulling their large
+  # images. Removes package-manager caches (pnpm/uv/npm/go module cache) and
+  # re-clonable git checkouts under hermes-data — these regrow as the agent
+  # works, and previously filled the machine's disk with no eviction. Nothing
+  # here is agent-authored data (state.db, security-review-runs, skills,
+  # sessions, vault, memories are all left alone).
+  cache-prune:
+    image: docker.io/library/busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
+    restart: "no"
+    # Gated on the restore so the two never touch the volume at once. Previously
+    # this depended on nothing and could delete paths while rclone-restore was
+    # still writing them. Order is restore-then-prune, not the reverse: the
+    # bucket still contains repo/ and toolchains/, so pruning first would just
+    # have them restored back over the top.
+    depends_on:
+      rclone-restore:
+        condition: service_completed_successfully
+    volumes:
+      - hermes-data:/data
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        echo "[cache-prune] before:"; df -h /data
+        rm -rf \
+          /data/home/.local/share/pnpm \
+          /data/home/.cache/uv \
+          /data/home/.cache/pnpm \
+          /data/home/.cache/node \
+          /data/home/.npm \
+          /data/home/.npm-global \
+          /data/home/.cache/pip \
+          /data/profiles/*/home/go/pkg/mod \
+          /data/toolchains/*-download \
+          /data/repo/* \
+          2>/dev/null
+        echo "[cache-prune] after:"; df -h /data
+
+
+  # ─────────────────────── restic / Cloudflare R2 ───────────────────────
+  # Replacement for the rclone-restore + rclone-sync pair above. These three
+  # run ALONGSIDE the rclone pair for now, and nothing else `depends_on` them,
+  # so a misconfigured restic path cannot stop hermes from booting. Deleting
+  # the rclone services and rewiring depends_on is a separate, later change.
+  #
+  # Why replace it: `rclone sync` is a mirror, not a backup — no restore points,
+  # and a bad write reaches the remote within SYNC_INTERVAL. It also issued one
+  # HEAD per object per cycle (~75,500 requests/cycle at the current object
+  # count) because the S3 backend keeps mtime in object metadata rather than in
+  # the list response. restic consults its own index instead, so a cycle costs
+  # ~20 requests regardless of file count (measured at 20,000 files: rclone
+  # 20,022 vs restic 17).
+
+  restic-restore:
+    image: "docker.io/restic/restic:0.17.3@sha256:8f5a62b422a2cb1277ea0dd6e826fe1acf649e5b9f02d60e5268d5fd1976255a"
+    platform: linux/amd64
+    restart: "no"
+    # Behind a profile, so `docker compose up` does NOT start it. While
+    # rclone-restore is still the authoritative restore path, two restores
+    # writing the same volume concurrently would race. Run it deliberately:
+    #   docker compose run --rm restic-restore
+    # At cutover, delete this profile and the rclone services together.
+    profiles: ["restore"]
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        set -eu
+        echo "[restic-restore] starting at $$(date -u +%FT%TZ)"
+
+        # Fail CLOSED. `restic snapshots` exits non-zero for an absent repo,
+        # wrong credentials and network failure alike, and exits 0 printing "[]"
+        # only for a reachable-but-empty repository (both measured). So
+        # "cannot reach it" can never be read as "nothing to restore".
+        #
+        # The repository is created ONCE by hand (`just restic-init`), never
+        # here. Running `restic init` on this path would turn any transient
+        # error into a silent second empty repository beside the real one.
+        if ! snaps=$$(restic snapshots --host "$$RESTIC_HOST" --json 2>&1); then
+          echo "[restic-restore] FATAL: repository unreachable or uninitialised" >&2
+          echo "$$snaps" >&2
+          exit 1
+        fi
+        if [ "$$(printf '%s' "$$snaps" | tr -d '[:space:]')" = "[]" ]; then
+          echo "[restic-restore] repository is empty (first-ever deployment), nothing to restore"
+          exit 0
+        fi
+
+        # --target / is correct: the snapshot records the absolute path
+        # /opt/data, so restic recreates it exactly there. The seeding backup
+        # must therefore also run against /opt/data, or the restore lands
+        # elsewhere and this volume silently stays empty.
+        echo "[restic-restore] restoring latest snapshot for host $$RESTIC_HOST"
+        restic restore latest --host "$$RESTIC_HOST" --target / --overwrite always
+
+        count=$$(find /opt/data -type f | wc -l)
+        size=$$(du -sh /opt/data | awk '{print $$1}')
+        echo "[restic-restore] complete: $$count files, $$size"
+    environment:
+      - HOME=/tmp
+      - RESTIC_CACHE_DIR=/tmp/restic-cache
+      # Pinned identity. Without it each container's random hostname forms its
+      # own retention group, and `restic forget` then deletes NOTHING while
+      # still exiting 0 — measured: --keep-last 2 left all 6 snapshots in place.
+      - RESTIC_HOST=rofl
+      - RESTIC_REPOSITORY=s3:https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com/${R2_BUCKET}
+      - RESTIC_PASSWORD=${RESTIC_PASSWORD}
+      - AWS_ACCESS_KEY_ID=${R2_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${R2_SECRET_ACCESS_KEY}
+      - AWS_DEFAULT_REGION=auto
+    volumes:
+      - hermes-data:/opt/data
+
+  # Keeps consistent copies of the live SQLite databases for restic-backup to
+  # archive. Copying a hot SQLite file byte-for-byte can capture a torn write;
+  # VACUUM INTO takes a proper read lock and emits a clean, compacted file.
+  #
+  # This runs on its own timer rather than as a one-shot, mirroring what
+  # hermes-security-dashboard already does with HERMES_SNAPSHOT_INTERVAL. The
+  # interval is half the backup interval, so whatever restic picks up is at
+  # most DB_SNAPSHOT_INTERVAL old regardless of how the two loops drift.
+  #
+  # python:3.12-alpine ships SQLite 3.53.2, so the stdlib sqlite3 module covers
+  # this with no package installed at runtime.
+  db-snapshot:
+    image: "docker.io/library/python:3.12-alpine@sha256:6d43704baacd1bfbe7c295d7f13079d5d8104ed33568873133f8fc69980419df"
+    platform: linux/amd64
+    restart: unless-stopped
+    # Same reason as restic-backup: never VACUUM a database mid-restore.
+    depends_on:
+      cache-prune:
+        condition: service_completed_successfully
+    entrypoint: /usr/local/bin/python
+    command:
+      - -u
+      - -c
+      - |
+        import os, pathlib, signal, sqlite3, sys, time
+
+        interval = int(os.environ.get("DB_SNAPSHOT_INTERVAL", "1800"))
+        root = pathlib.Path("/opt/data")
+        out = root / "db-snapshots"
+
+        stopping = False
+        def stop(*_):
+            global stopping
+            print("[db-snapshot] signal received, will exit after this cycle")
+            stopping = True
+        signal.signal(signal.SIGTERM, stop)
+        signal.signal(signal.SIGINT, stop)
+
+        def cycle():
+            # security/live is skipped: hermes-security-dashboard writes its own
+            # VACUUM INTO snapshot to security/snapshot.db on its own schedule.
+            skip = {out, root / "security" / "live"}
+            out.mkdir(parents=True, exist_ok=True)
+            found = failed = 0
+            for db in sorted(root.rglob("*.db")):
+                if set(db.parents) & skip:
+                    continue
+                found += 1
+                dest = out / db.relative_to(root).as_posix().replace("/", "__")
+                tmp = dest.with_name(dest.name + ".tmp")
+                try:
+                    start = time.time()
+                    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=60)
+                    try:
+                        tmp.unlink(missing_ok=True)
+                        con.execute("VACUUM INTO ?", (str(tmp),))
+                    finally:
+                        con.close()
+                    # Atomic rename, so a backup running concurrently — or a
+                    # machine killed mid-VACUUM — never sees a partial file.
+                    tmp.replace(dest)
+                    print(f"[db-snapshot] {db} -> {dest.name} "
+                          f"({dest.stat().st_size} bytes, {time.time() - start:.1f}s)")
+                except Exception as exc:
+                    failed += 1
+                    tmp.unlink(missing_ok=True)
+                    print(f"[db-snapshot] WARN: {db}: {exc}", file=sys.stderr)
+            print(f"[db-snapshot] cycle complete: {found} databases, {failed} failed")
+
+        print(f"[db-snapshot] loop starting, interval={interval}s")
+        while not stopping:
+            cycle()
+            if stopping:
+                break
+            time.sleep(interval)
+        print("[db-snapshot] exiting")
+    environment:
+      - DB_SNAPSHOT_INTERVAL=${DB_SNAPSHOT_INTERVAL:-1800}
+    volumes:
+      - hermes-data:/opt/data
+
+  restic-backup:
+    image: "docker.io/restic/restic:0.17.3@sha256:8f5a62b422a2cb1277ea0dd6e826fe1acf649e5b9f02d60e5268d5fd1976255a"
+    platform: linux/amd64
+    restart: unless-stopped
+    entrypoint: /bin/sh
+    # Gated at the END of the boot chain (rclone-restore -> cache-prune), not on
+    # restic-restore. Backing up a half-restored or half-pruned volume would
+    # archive incomplete data, and once retention ages out the good snapshots
+    # that is all that would remain. This direction of dependency cannot delay
+    # hermes — nothing depends on restic-backup.
+    depends_on:
+      cache-prune:
+        condition: service_completed_successfully
+    command:
+      - -c
+      - |
+        set -u
+        INTERVAL=$${BACKUP_INTERVAL:-3600}
+        PRUNE_EVERY=$${PRUNE_EVERY_CYCLES:-24}
+
+        # Written here rather than mounted: this compose file uses no bind
+        # mounts, and adding one to ship a text file would change the enclave
+        # measurement for no benefit.
+        cat > /tmp/restic-excludes <<'EXCLUDES'
+        # Regenerable caches and checkouts. These paths mirror the cache-prune
+        # service below, which is where they were verified to actually live.
+        /opt/data/repo
+        /opt/data/cache
+        /opt/data/logs
+        /opt/data/toolchains
+        /opt/data/home/.cache
+        /opt/data/home/.npm
+        /opt/data/home/.npm-global
+        /opt/data/home/.local/share/pnpm
+        /opt/data/profiles/*/cache
+        /opt/data/profiles/*/home/go/pkg/mod
+        # Volatile runtime state namespaced to the machine that wrote it. This
+        # list is hermes_cli/backup.py's own _IMPORT_SKIP_NAMES: Hermes excludes
+        # these from its native backups because restoring them onto a different
+        # host is "at best meaningless and at worst actively harmful".
+        # gateway_state.json is the harmful one — it drives the container-boot
+        # reconciler, and a stale value leaves the gateway stuck "starting" and
+        # disconnected from the Nous portal.
+        #
+        # We restore the raw volume rather than going through `hermes backup
+        # import`, so none of that filtering applies to us. backup.py claims the
+        # container boot sweep already handles these, but _STALE_RUNTIME_FILES
+        # is only ("gateway.pid", "processes.json") — the other three survive.
+        /opt/data/gateway_state.json
+        /opt/data/gateway.pid
+        /opt/data/gateway.lock
+        /opt/data/cron.pid
+        /opt/data/processes.json
+        /opt/data/profiles/*/gateway_state.json
+        /opt/data/profiles/*/gateway.pid
+        /opt/data/profiles/*/gateway.lock
+        /opt/data/profiles/*/cron.pid
+        /opt/data/profiles/*/processes.json
+        # Live SQLite files. The clean VACUUM INTO copies under db-snapshots/
+        # and security/snapshot.db are what actually get archived; a hot copy
+        # can be torn, and state.db alone is ~300 MB of churn per run.
+        /opt/data/security/live
+        /opt/data/*.db
+        /opt/data/*.db-wal
+        /opt/data/*.db-shm
+        /opt/data/db-snapshots/*.tmp
+        # Generic build and virtualenv noise, at any depth.
+        **/node_modules
+        **/__pycache__
+        **/.venv
+        **/.tox
+        **/.pytest_cache
+        **/.mypy_cache
+        **/.ruff_cache
+        *.pyc
+        EXCLUDES
+        echo "[backup] $$(grep -cvE '^[[:space:]]*(#|$$)' /tmp/restic-excludes) exclude rules loaded"
+
+        shutdown_requested=0
+        shutdown() {
+          echo "[backup] signal received, will flush after current cycle"
+          shutdown_requested=1
+        }
+        trap shutdown TERM INT
+
+        cycle=0
+        run_backup() {
+          echo "[backup] cycle starting at $$(date -u +%FT%TZ)"
+          start=$$(date +%s)
+
+          if restic backup /opt/data \
+               --host "$$RESTIC_HOST" \
+               --exclude-file=/tmp/restic-excludes \
+               --exclude-caches \
+               --tag rofl; then
+            elapsed=$$(( $$(date +%s) - start ))
+            echo "[backup] cycle complete in $${elapsed}s"
+          else
+            rc=$$?
+            echo "[backup] WARN: backup failed (rc=$$rc), continuing" >&2
+            return
+          fi
+
+          cycle=$$(( cycle + 1 ))
+          [ "$$(( cycle % PRUNE_EVERY ))" -eq 0 ] || return
+
+          # A ROFL machine dies without warning, so a SIGKILLed backup leaves a
+          # lock object behind. Measured: that stale lock does NOT block the next
+          # `restic backup` (it takes a non-exclusive lock), but it DOES block
+          # `forget --prune` (exclusive, exit 11). Plain `restic unlock` will not
+          # clear it either — restic proves staleness from hostname+PID, and the
+          # hostname differs every run. --remove-all skips that proof, which is
+          # safe here because this repository has exactly one writer.
+          echo "[backup] running retention (cycle $$cycle)"
+          restic unlock --remove-all || true
+          if restic forget \
+               --host "$$RESTIC_HOST" \
+               --keep-hourly 24 --keep-daily 7 --keep-weekly 4 --keep-monthly 6 \
+               --prune; then
+            echo "[backup] retention complete"
+          else
+            echo "[backup] WARN: retention failed (rc=$$?), continuing" >&2
+          fi
+        }
+
+        echo "[backup] loop starting, interval=$${INTERVAL}s, prune every $${PRUNE_EVERY} cycles"
+
+        while [ "$$shutdown_requested" -eq 0 ]; do
+          run_backup
+          [ "$$shutdown_requested" -eq 1 ] && break
+          sleep "$$INTERVAL" &
+          wait $$! 2>/dev/null || true
+        done
+
+        echo "[backup] flushing final cycle before exit"
+        run_backup
+        echo "[backup] exiting"
+    environment:
+      - HOME=/tmp
+      - RESTIC_CACHE_DIR=/tmp/restic-cache
+      - RESTIC_HOST=rofl
+      - RESTIC_REPOSITORY=s3:https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com/${R2_BUCKET}
+      - RESTIC_PASSWORD=${RESTIC_PASSWORD}
+      - AWS_ACCESS_KEY_ID=${R2_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${R2_SECRET_ACCESS_KEY}
+      - AWS_DEFAULT_REGION=auto
+      - BACKUP_INTERVAL=${BACKUP_INTERVAL:-3600}
+      - PRUNE_EVERY_CYCLES=${PRUNE_EVERY_CYCLES:-24}
     volumes:
       - hermes-data:/opt/data
 

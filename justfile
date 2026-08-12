@@ -61,4 +61,26 @@ test-akave *args:
 purge-bucket-cruft *args:
     @./scripts/purge-bucket-cruft.sh {{args}}
 
+# Deliberately not done by the sidecars: an init on a boot path would turn any
+# transient error into a silent second empty repository beside the real one.
+# Create the restic repository on Cloudflare R2 (one-time, safe to re-run).
+restic-init:
+    @./scripts/restic-init.sh
+
+# Uses the same pinned restic image + env mapping as the sidecars, so a pass
+# here means they will boot. Pass --read-only to skip the write round-trip.
+# Smoke-test the R2 repository: creds, integrity, backup round-trip.
+test-r2 *args:
+    @./scripts/test-r2.sh {{args}}
+
+# List restore points in the R2 repository.
+restic-snapshots:
+    @./scripts/restic-run.sh snapshots --host rofl
+
+# Passes straight through, so forget/prune/unlock are as destructive as ever,
+# and the enclave's backup sidecar may be using the same repository.
+# Run any restic command against R2 (e.g. just restic ls latest).
+restic *args:
+    @./scripts/restic-run.sh {{args}}
+
 ship: build set-secrets update deploy
