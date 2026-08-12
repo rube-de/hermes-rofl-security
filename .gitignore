@@ -1,3 +1,8 @@
 *.orc
 .env
 .oasis/
+
+# Claude Code local machine state (settings + task lock). The reports under
+# .claude/files/ are intentionally tracked.
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
