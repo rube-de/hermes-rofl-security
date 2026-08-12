@@ -466,15 +466,33 @@ services:
         signal.signal(signal.SIGTERM, stop)
         signal.signal(signal.SIGINT, stop)
 
+        # Path fragments whose databases are not agent state worth a consistent
+        # copy. Snapshotting these doubled their size on disk for nothing, and
+        # restic excludes most of them anyway so the copies were never even
+        # archived. The pnpm store index is the worst offender: it is a package
+        # cache that cache-prune deletes outright.
+        SKIP_PARTS = (
+            "/cache/", "/.cache/", "/node_modules/", "/.venv/",
+            "/.local/share/pnpm/", "/.local/share/pki/", "/.npm/",
+            "/repo/", "/toolchains/", "/lazy-packages/",
+        )
+
         def cycle():
             # security/live is skipped: hermes-security-dashboard writes its own
-            # VACUUM INTO snapshot to security/snapshot.db on its own schedule.
+            # VACUUM INTO snapshot to security/snapshot.db on its own schedule --
+            # and that snapshot is skipped too, since copying it would be
+            # snapshotting a snapshot.
             skip = {out, root / "security" / "live"}
             out.mkdir(parents=True, exist_ok=True)
             found = failed = 0
             expected = set()
             for db in sorted(root.rglob("*.db")):
                 if set(db.parents) & skip:
+                    continue
+                rel = "/" + db.relative_to(root).as_posix()
+                if any(part in rel for part in SKIP_PARTS):
+                    continue
+                if rel == "/security/snapshot.db":
                     continue
                 found += 1
                 dest = out / db.relative_to(root).as_posix().replace("/", "__")
