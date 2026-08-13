@@ -152,6 +152,12 @@ services:
         { echo "$$(date -u +%FT%TZ) security-dash  proceeded after $${waited}s" >> /data/.boot-trace; } 2>/dev/null || true
         exec docker-entrypoint.sh "$$@"
       - "--"
+    # Stated explicitly rather than inherited from the image. Overriding
+    # `entrypoint:` clears the image CMD under docker compose (podman-compose
+    # happens to keep it), and with no args the image's docker-entrypoint.sh
+    # falls back to bare `node`, which exits at once and restart-loops the
+    # container. Naming it here makes the wrap independent of that difference.
+    command: ["node", "build"]
     # No depends_on by design. podman-compose turns a
     # `service_completed_successfully` dependency into podman's --requires,
     # which demands the dependency be RUNNING -- and re-triggers that one-shot
