@@ -111,6 +111,44 @@ services:
       - sh
       - -c
       - |
+        # Ordering gate. Must run before ANY write below: `mkdir /opt/data/vault`
+        # alone would make the volume look populated to restic-restore's guard, so
+        # on a fresh machine the restore would skip and disaster recovery would
+        # silently come up as an empty agent.
+        #
+        # Same rule as the backup services: match the sentinel against this boot's
+        # kernel boot_id, and let the bound measure time with NO restore running,
+        # so a slow first-ever restore is never timed out from under us.
+        marker=/opt/data/.restore-complete
+        inprogress=/opt/data/.restore-inprogress
+        bootid=$$(cat /proc/sys/kernel/random/boot_id)
+        waited=0
+        stalled=0
+        while [ "$$(cat "$$marker" 2>/dev/null)" != "$$bootid" ]; do
+          if [ "$$(cat "$$inprogress" 2>/dev/null)" = "$$bootid" ]; then
+            stalled=0
+          else
+            stalled=$$(( stalled + 5 ))
+          fi
+          if [ "$$stalled" -ge "$${WAIT_MAX:-1200}" ]; then
+            # An empty volume means this is a real recovery and the restore has not
+            # happened. Starting would initialise a blank agent over the top, so
+            # fail loudly instead and let restart: unless-stopped retry.
+            if [ -z "$$(find /opt/data -mindepth 1 \
+                          ! -name '.restore-*' ! -name .boot-trace \
+                          -print -quit 2>/dev/null)" ]; then
+              echo "[hermes] FATAL: volume empty and no restore after $${stalled}s" >&2
+              exit 1
+            fi
+            echo "[hermes] WARN: no restore sentinel for $${stalled}s, volume has data, starting" >&2
+            break
+          fi
+          [ $$(( waited % 60 )) -eq 0 ] && echo "[hermes] waiting for restic-restore ($${waited}s)"
+          sleep 5
+          waited=$$(( waited + 5 ))
+        done
+        echo "$$(date -u +%FT%TZ) hermes         proceeded after $${waited}s" >> /opt/data/.boot-trace 2>/dev/null || true
+
         mkdir -p /opt/data/vault
         if [ ! -f /opt/data/.compose-initialized ]; then
           cat > /opt/data/config.yaml <<'CFG'
