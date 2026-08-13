@@ -239,6 +239,27 @@ services:
           echo "[restic-restore] sentinel written: $$SENTINEL"
         }
 
+        # podman-compose maps `condition: service_completed_successfully` onto
+        # podman's --requires, and podman refuses to start a container whose
+        # required container is not RUNNING -- it fails the dependent with
+        # "container state improper". A one-shot that exits in under a second
+        # therefore breaks every dependent, permanently: measured in production
+        # the moment this replaced rclone-restore, whose multi-minute runtime had
+        # masked the problem by always being alive when dependents were started.
+        # (It also explains the 8 rclone-restore runs per boot: each dependent's
+        # start re-triggered the required container.)
+        #
+        # So hold the container open past the window in which podman starts the
+        # dependents. This delays nothing: the sentinel is published before we
+        # get here, and every waiter keys off the sentinel, not off this exit.
+        finish() {
+          echo "[restic-restore] $$1"
+          trace "exit: $$1"
+          echo "[restic-restore] holding $${RESTORE_LINGER:-300}s so dependents can start"
+          sleep "$${RESTORE_LINGER:-300}"
+          exit 0
+        }
+
         # podman-compose re-executes a service_completed_successfully dependency
         # once per dependent: measured 8 rclone-restore runs in a single boot,
         # ~100s apart, which is most of the ~14 minute boot time. Restoring more
@@ -255,9 +276,7 @@ services:
         # escape hatch unusable exactly when it is needed.
         if [ "$$FORCE" != "1" ] && \
            [ "$$(cat "$$SENTINEL" 2>/dev/null)" = "$$BOOT_ID" ]; then
-          echo "[restic-restore] already restored this boot, nothing to do"
-          trace "exit: already restored this boot"
-          exit 0
+          finish "already restored this boot, nothing to do"
         fi
 
         # A sibling invocation is restoring RIGHT NOW. Without this, the
@@ -278,9 +297,7 @@ services:
             fi
             sleep 5; waited=$$(( waited + 5 ))
           done
-          echo "[restic-restore] sibling restore finished after $${waited}s"
-          trace "exit: sibling restore finished after $${waited}s"
-          exit 0
+          finish "sibling restore finished after $${waited}s"
         fi
 
         # Never overwrite a populated volume. restic restores with
@@ -306,10 +323,8 @@ services:
                         ! -name .restore-complete ! -name .restore-inprogress \
                         ! -name .boot-trace \
                         -print -quit 2>/dev/null)" ]; then
-          echo "[restic-restore] volume already holds data, not restoring"
           mark_done
-          trace "exit: volume already populated"
-          exit 0
+          finish "volume already holds data, not restoring"
         fi
 
         echo "[restic-restore] starting at $$(date -u +%FT%TZ)"
@@ -329,10 +344,8 @@ services:
           exit 1
         fi
         if [ "$$(printf '%s' "$$snaps" | tr -d '[:space:]')" = "[]" ]; then
-          echo "[restic-restore] repository is empty (first-ever deployment), nothing to restore"
           mark_done
-          trace "exit: repository empty"
-          exit 0
+          finish "repository is empty (first-ever deployment), nothing to restore"
         fi
 
         # --target / is correct: the snapshot records the absolute path
@@ -353,7 +366,7 @@ services:
         size=$$(du -sh /opt/data | awk '{print $$1}')
         echo "[restic-restore] complete: $$count files, $$size"
         mark_done
-        trace "exit: restored $$count files ($$size)"
+        finish "restored $$count files ($$size)"
     environment:
       - HOME=/tmp
       - RESTIC_CACHE_DIR=/tmp/restic-cache
