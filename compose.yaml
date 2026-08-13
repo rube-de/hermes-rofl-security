@@ -1,184 +1,4 @@
 services:
-  rclone-restore:
-    image: "docker.io/rclone/rclone:1.69@sha256:1f497a86a6466395e62a5886613a14b7b18809543566ef9fa35fa1371a7ecc0f"
-    platform: linux/amd64
-    user: "10000:10000"
-    restart: "no"
-    entrypoint: /bin/sh
-    command:
-      - -c
-      - |
-        set -eu
-        trace() { echo "$$(date -u +%FT%TZ) rclone-restore $$1" >> /sync/.boot-trace 2>/dev/null || true; }
-        # podman-compose re-executes a service_completed_successfully dependency
-        # once per dependent: measured 8 rclone-restore runs in a single boot,
-        # ~100s apart, which is most of the ~14 minute boot time. Restoring more
-        # than once per boot is at best wasted work and at worst destructive --
-        # restic-restore uses --overwrite always, so a second pass while the
-        # agent is live would revert its work to the snapshot.
-        #
-        # The sentinel holds this boot's kernel boot_id and is written only on
-        # success, so a failed restore leaves no matching marker and the next
-        # invocation still retries. Only a completed restore is skipped.
-        if [ "$$(cat /sync/.restore-complete 2>/dev/null)" = "$$(cat /proc/sys/kernel/random/boot_id)" ]; then
-          echo "[restore] already restored this boot, nothing to do"
-          exit 0
-        fi
-
-        trace start
-        echo "[restore] starting at $$(date -u +%FT%TZ)"
-        echo "[diag] df:"; df -h /sync
-        echo "[diag] top dirs:"; du -sh /sync/* 2>/dev/null | sort -rh | head -20
-        if ! listing=$$(rclone lsf crypt: 2>&1); then
-          echo "[restore] FATAL: cannot access crypt: $$listing" >&2
-          exit 1
-        fi
-        # Sentinel the other services block on. Written only on a path where the
-        # volume is known-good, so a restore FATAL leaves it absent and every
-        # waiter stays parked rather than acting on half-restored data.
-        mark_done() {
-          cat /proc/sys/kernel/random/boot_id > /sync/.restore-complete
-          trace sentinel-written
-          echo "[restore] sentinel written: /sync/.restore-complete"
-        }
-
-        if [ -z "$$listing" ]; then
-          echo "[restore] remote is empty (first-ever deployment), nothing to restore"
-          mark_done
-          exit 0
-        fi
-        trace "disk $$(df -h /sync | awk 'NR==2{print $$3" used "$$4" free"}')"
-        trace "remote listed"
-        echo "[restore] copying crypt: -> /sync"
-        # rclone's status is captured rather than left to `set -e`: this script's
-        # stdout is not captured by ROFL, so an aborted copy died invisibly and
-        # the sentinel was simply never written. The trace file is the only
-        # channel that survives.
-        set +e
-        rclone copy crypt: /sync \
-          --update --checksum \
-          --log-level INFO \
-          --stats 30s --stats-one-line
-        rc=$$?
-        set -e
-        trace "copy exited rc=$$rc"
-        if [ "$$rc" -ne 0 ]; then
-          echo "[restore] FATAL: copy failed rc=$$rc" >&2
-          exit 1
-        fi
-        count=$$(find /sync -type f | wc -l)
-        size=$$(du -sh /sync | awk '{print $$1}')
-        echo "[restore] complete: $$count files, $$size"
-        mark_done
-    environment:
-      - HOME=/tmp
-      - RCLONE_CONFIG_AKAVE_TYPE=s3
-      - RCLONE_CONFIG_AKAVE_PROVIDER=Other
-      - RCLONE_CONFIG_AKAVE_REGION=akave-network
-      - RCLONE_CONFIG_AKAVE_ENDPOINT=${AKAVE_ENDPOINT}
-      - RCLONE_CONFIG_AKAVE_ACCESS_KEY_ID=${AKAVE_ACCESS_KEY}
-      - RCLONE_CONFIG_AKAVE_SECRET_ACCESS_KEY=${AKAVE_SECRET_KEY}
-      - RCLONE_CONFIG_AKAVE_FORCE_PATH_STYLE=true
-      - RCLONE_CONFIG_CRYPT_TYPE=crypt
-      - RCLONE_CONFIG_CRYPT_REMOTE=akave:${AKAVE_BUCKET}
-      - RCLONE_CONFIG_CRYPT_FILENAME_ENCRYPTION=standard
-      - RCLONE_CONFIG_CRYPT_PASSWORD=${RCLONE_CRYPT_PASSWORD}
-      - RCLONE_CONFIG_CRYPT_PASSWORD2=${RCLONE_CRYPT_SALT}
-    volumes:
-      - hermes-data:/sync
-
-  rclone-sync:
-    image: "docker.io/rclone/rclone:1.69@sha256:1f497a86a6466395e62a5886613a14b7b18809543566ef9fa35fa1371a7ecc0f"
-    platform: linux/amd64
-    user: "10000:10000"
-    restart: unless-stopped
-    entrypoint: /bin/sh
-    depends_on:
-      rclone-restore:
-        condition: service_completed_successfully
-    command:
-      - -c
-      - |
-        set -u
-        INTERVAL=$${SYNC_INTERVAL:-300}
-
-        shutdown_requested=0
-        shutdown() {
-          echo "[sync] signal received, will flush after current cycle"
-          shutdown_requested=1
-        }
-        trap shutdown TERM INT
-
-        run_sync() {
-          echo "[sync] cycle starting at $$(date -u +%FT%TZ)"
-          start=$$(date +%s)
-          # NOTE: no comments inside the continued command below — a `#` after a
-          # backslash-continuation ends the command and turns the remaining
-          # --exclude lines into a separate, bogus one (rc=127).
-          #
-          # db-snapshots/** is db-snapshot's VACUUM output: restic archives it,
-          # rclone must not. The ~300 MB state.db snapshot is rewritten every
-          # cycle, so syncing it would re-upload ~300 MB per rclone cycle to the
-          # very bucket this migration exists to stop paying for.
-          if rclone sync /sync crypt: \
-               --update --delete-during \
-               --exclude=logs/** \
-               --exclude=.cache/** \
-               --exclude=.npm/** \
-               --exclude=node_modules/** \
-               --exclude=__pycache__/** \
-               --exclude=*.pyc \
-               --exclude=.pytest_cache/** \
-               --exclude=.mypy_cache/** \
-               --exclude=.ruff_cache/** \
-               --exclude=.tox/** \
-               --exclude=.venv/** \
-               --exclude=security/live/** \
-               --exclude=db-snapshots/** \
-               --exclude=gateway_state.json \
-               --exclude=gateway.pid \
-               --exclude=gateway.lock \
-               --exclude=cron.pid \
-               --exclude=processes.json \
-               --log-level INFO --stats 0; then
-            elapsed=$$(( $$(date +%s) - start ))
-            echo "[sync] cycle complete in $${elapsed}s"
-          else
-            rc=$$?
-            echo "[sync] WARN: cycle failed (rc=$$rc), continuing" >&2
-          fi
-        }
-
-        echo "[sync] loop starting, interval=$${INTERVAL}s"
-
-        while [ "$$shutdown_requested" -eq 0 ]; do
-          run_sync
-          [ "$$shutdown_requested" -eq 1 ] && break
-          sleep "$$INTERVAL" &
-          wait $$! 2>/dev/null || true
-        done
-
-        echo "[sync] flushing final cycle before exit"
-        run_sync
-        echo "[sync] exiting"
-    environment:
-      - HOME=/tmp
-      - SYNC_INTERVAL=${SYNC_INTERVAL:-300}
-      - RCLONE_CONFIG_AKAVE_TYPE=s3
-      - RCLONE_CONFIG_AKAVE_PROVIDER=Other
-      - RCLONE_CONFIG_AKAVE_REGION=akave-network
-      - RCLONE_CONFIG_AKAVE_ENDPOINT=${AKAVE_ENDPOINT}
-      - RCLONE_CONFIG_AKAVE_ACCESS_KEY_ID=${AKAVE_ACCESS_KEY}
-      - RCLONE_CONFIG_AKAVE_SECRET_ACCESS_KEY=${AKAVE_SECRET_KEY}
-      - RCLONE_CONFIG_AKAVE_FORCE_PATH_STYLE=true
-      - RCLONE_CONFIG_CRYPT_TYPE=crypt
-      - RCLONE_CONFIG_CRYPT_REMOTE=akave:${AKAVE_BUCKET}
-      - RCLONE_CONFIG_CRYPT_FILENAME_ENCRYPTION=standard
-      - RCLONE_CONFIG_CRYPT_PASSWORD=${RCLONE_CRYPT_PASSWORD}
-      - RCLONE_CONFIG_CRYPT_PASSWORD2=${RCLONE_CRYPT_SALT}
-    volumes:
-      - hermes-data:/sync
-
   wallet-gateway:
     # SIWE wallet gate: https://github.com/rube-de/hermes-wallet-gateway
     # Use the published image or build your own (see that repo).
@@ -213,14 +33,11 @@ services:
     image: docker.io/nousresearch/hermes-agent:v2026.8.3@sha256:16788311e2fa3035456bdc1bafb8ec2b1777db64ebf020af9bb7eb73c3712c9e
     platform: linux/amd64
     restart: unless-stopped
-    # Gated on the restore like its siblings. It briefly was not: rclone-restore
-    # used to FATAL on broken Akave credentials and would have blocked the
-    # dashboard from ever starting. Those credentials work again
-    # (`just test-akave --read-only` passes), so the exception is gone.
-    # Failing closed is the correct behaviour anyway — serving the dashboard off
-    # an unrestored volume shows an empty agent as if it were real.
+    # Gated on the restore like its siblings. Failing closed is correct here:
+    # serving the dashboard off an unrestored volume shows an empty agent as if
+    # it were real.
     depends_on:
-      rclone-restore:
+      restic-restore:
         condition: service_completed_successfully
       cache-prune:
         condition: service_completed_successfully
@@ -256,14 +73,14 @@ services:
     platform: linux/amd64
     restart: unless-stopped
     depends_on:
-      rclone-restore:
+      restic-restore:
         condition: service_completed_successfully
       cache-prune:
         condition: service_completed_successfully
     environment:
-      # Live WAL DB is isolated under security/live/ (excluded from sync); only
-      # the VACUUM-INTO snapshot at security/snapshot.db is shipped to Akave and
-      # restored on boot. Copying a live SQLite file with rclone is unsafe.
+      # Live WAL DB is isolated under security/live/ (excluded from the backup);
+      # only the VACUUM-INTO snapshot at security/snapshot.db is archived.
+      # Copying a live SQLite file byte-for-byte is unsafe.
       - HERMES_DB=/data/security/live/hermes.db
       - HERMES_DB_SNAPSHOT=/data/security/snapshot.db
       - HERMES_SNAPSHOT_INTERVAL=300
@@ -280,7 +97,7 @@ services:
     platform: linux/amd64
     restart: unless-stopped
     depends_on:
-      rclone-restore:
+      restic-restore:
         condition: service_completed_successfully
       cache-prune:
         condition: service_completed_successfully
@@ -324,13 +141,10 @@ services:
   cache-prune:
     image: docker.io/library/busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
     restart: "no"
-    # Gated on the restore so the two never touch the volume at once. Previously
-    # this depended on nothing and could delete paths while rclone-restore was
-    # still writing them. Order is restore-then-prune, not the reverse: the
-    # bucket still contains repo/ and toolchains/, so pruning first would just
-    # have them restored back over the top.
+    # Gated on the restore so the two never touch the volume at once; this
+    # previously depended on nothing and could delete paths mid-restore.
     depends_on:
-      rclone-restore:
+      restic-restore:
         condition: service_completed_successfully
     volumes:
       - hermes-data:/data
@@ -355,7 +169,7 @@ services:
               return 1
             fi
             [ $$(( waited % 60 )) -eq 0 ] && \
-              echo "[cache-prune] waiting for rclone-restore to finish ($${waited}s)"
+              echo "[cache-prune] waiting for restic-restore to finish ($${waited}s)"
             sleep 5; waited=$$(( waited + 5 ))
           done
         }
@@ -381,34 +195,52 @@ services:
 
 
   # ─────────────────────── restic / Cloudflare R2 ───────────────────────
-  # Replacement for the rclone-restore + rclone-sync pair above. These three
-  # run ALONGSIDE the rclone pair for now, and nothing else `depends_on` them,
-  # so a misconfigured restic path cannot stop hermes from booting. Deleting
-  # the rclone services and rewiring depends_on is a separate, later change.
+  # The backup path. Replaced the rclone sync + restore pair, now removed.
   #
-  # Why replace it: `rclone sync` is a mirror, not a backup — no restore points,
-  # and a bad write reaches the remote within SYNC_INTERVAL. It also issued one
-  # HEAD per object per cycle (~75,500 requests/cycle at the current object
-  # count) because the S3 backend keeps mtime in object metadata rather than in
-  # the list response. restic consults its own index instead, so a cycle costs
-  # ~20 requests regardless of file count (measured at 20,000 files: rclone
-  # 20,022 vs restic 17).
+  # Why: `rclone sync` is a mirror, not a backup — no restore points, and a bad
+  # write reached the remote within SYNC_INTERVAL. It also issued one HEAD per
+  # object per cycle (~75,500 at the current object count) because the S3
+  # backend keeps mtime in object metadata rather than in the list response;
+  # restic consults its own index, so a cycle costs ~20 requests regardless of
+  # file count (measured at 20,000 files: 20,022 vs 17).
+  #
+  # The rclone restore also became the boot bottleneck. podman-compose re-runs a
+  # service_completed_successfully dependency once per dependent, and each pass
+  # listed 75k objects; when that began stalling into rclone's 5-minute idle
+  # timeout, eight passes turned a boot into 40 minutes AND the restore never
+  # completed, so backups stopped for ~18 hours. restic reads its index instead.
+  #
+  # Akave secrets are retained for now as the rollback path.
 
   restic-restore:
     image: "docker.io/restic/restic:0.17.3@sha256:8f5a62b422a2cb1277ea0dd6e826fe1acf649e5b9f02d60e5268d5fd1976255a"
     platform: linux/amd64
     restart: "no"
-    # Behind a profile, so `docker compose up` does NOT start it. While
-    # rclone-restore is still the authoritative restore path, two restores
-    # writing the same volume concurrently would race. Run it deliberately:
-    #   docker compose run --rm restic-restore
-    # At cutover, delete this profile and the rclone services together.
-    profiles: ["restore"]
     entrypoint: /bin/sh
     command:
       - -c
       - |
         set -eu
+
+        BOOT_ID=$$(cat /proc/sys/kernel/random/boot_id)
+        SENTINEL=/opt/data/.restore-complete
+        INPROGRESS=/opt/data/.restore-inprogress
+        FORCE=$${RESTIC_FORCE_RESTORE:-0}
+
+        # ROFL captures stdout from only some containers, so the ordering is
+        # also recorded on the volume, where restic archives it and `restic
+        # dump` can read it back after the fact.
+        trace() { echo "$$(date -u +%FT%TZ) restic-restore $$1" >> /opt/data/.boot-trace 2>/dev/null || true; }
+        trace "start (force=$$FORCE)"
+
+        mark_done() {
+          # Sentinel first, then clear the marker: a crash between the two
+          # leaves waiters proceeding, never waiting forever.
+          echo "$$BOOT_ID" > "$$SENTINEL"
+          rm -f "$$INPROGRESS"
+          echo "[restic-restore] sentinel written: $$SENTINEL"
+        }
+
         # podman-compose re-executes a service_completed_successfully dependency
         # once per dependent: measured 8 rclone-restore runs in a single boot,
         # ~100s apart, which is most of the ~14 minute boot time. Restoring more
@@ -419,8 +251,66 @@ services:
         # The sentinel holds this boot's kernel boot_id and is written only on
         # success, so a failed restore leaves no matching marker and the next
         # invocation still retries. Only a completed restore is skipped.
-        if [ "$$(cat /opt/data/.restore-complete 2>/dev/null)" = "$$(cat /proc/sys/kernel/random/boot_id)" ]; then
+        # RESTIC_FORCE_RESTORE bypasses EVERY guard. A deliberate recovery is
+        # normally run on a machine that has already booted and restored, so the
+        # sentinel already matches this boot -- checking it first would make the
+        # escape hatch unusable exactly when it is needed.
+        if [ "$$FORCE" != "1" ] && \
+           [ "$$(cat "$$SENTINEL" 2>/dev/null)" = "$$BOOT_ID" ]; then
           echo "[restic-restore] already restored this boot, nothing to do"
+          trace "exit: already restored this boot"
+          exit 0
+        fi
+
+        # A sibling invocation is restoring RIGHT NOW. Without this, the
+        # populated-volume guard below would see the files that sibling has
+        # written so far, conclude the volume already holds data, and publish a
+        # sentinel while the restore is still in flight -- releasing every
+        # waiter onto a half-restored tree, on the one path where a full restore
+        # is actually happening. Wait for the sibling's verdict instead.
+        if [ "$$FORCE" != "1" ] && \
+           [ "$$(cat "$$INPROGRESS" 2>/dev/null)" = "$$BOOT_ID" ]; then
+          echo "[restic-restore] another invocation is restoring, waiting for it"
+          waited=0
+          while [ "$$(cat "$$SENTINEL" 2>/dev/null)" != "$$BOOT_ID" ]; do
+            if [ "$$waited" -ge "$${RESTORE_WAIT_MAX:-1800}" ]; then
+              echo "[restic-restore] FATAL: sibling restore unfinished after $${waited}s" >&2
+              trace "exit: sibling restore timed out after $${waited}s"
+              exit 1
+            fi
+            sleep 5; waited=$$(( waited + 5 ))
+          done
+          echo "[restic-restore] sibling restore finished after $${waited}s"
+          trace "exit: sibling restore finished after $${waited}s"
+          exit 0
+        fi
+
+        # Never overwrite a populated volume. restic restores with
+        # --overwrite always, so running it against a machine that already holds
+        # live state would revert that state to the last snapshot. The volume
+        # survives reboots, so the ordinary case is "the data is already here"
+        # and the correct action is to do nothing.
+        #
+        # A genuinely fresh machine has an empty volume and IS restored -- that
+        # is the disaster-recovery path. Recovering onto existing data is a
+        # deliberate act:
+        #   docker compose run --rm -e RESTIC_FORCE_RESTORE=1 restic-restore
+        #
+        # The exception is a marker left by an EARLIER boot: that boot began a
+        # restore and never finished it, so what is on the volume is a partial
+        # tree. Trusting it would leave the machine permanently half-restored,
+        # since every later boot would see "populated" and skip.
+        if [ -f "$$INPROGRESS" ]; then
+          echo "[restic-restore] previous boot died mid-restore, volume is partial"
+          trace "stale in-progress marker: restoring over partial tree"
+        elif [ "$$FORCE" != "1" ] && \
+             [ -n "$$(find /opt/data -mindepth 1 \
+                        ! -name .restore-complete ! -name .restore-inprogress \
+                        ! -name .boot-trace \
+                        -print -quit 2>/dev/null)" ]; then
+          echo "[restic-restore] volume already holds data, not restoring"
+          mark_done
+          trace "exit: volume already populated"
           exit 0
         fi
 
@@ -437,19 +327,13 @@ services:
         if ! snaps=$$(restic snapshots --host "$$RESTIC_HOST" --json 2>&1); then
           echo "[restic-restore] FATAL: repository unreachable or uninitialised" >&2
           echo "$$snaps" >&2
+          trace "exit: repository unreachable"
           exit 1
         fi
-        # Same sentinel rclone-restore publishes: written only where the volume
-        # is known-good, so a failure parks every waiter instead of letting them
-        # act on half-restored data. At cutover this becomes the only writer.
-        mark_done() {
-          cat /proc/sys/kernel/random/boot_id > /opt/data/.restore-complete
-          echo "[restic-restore] sentinel written: /opt/data/.restore-complete"
-        }
-
         if [ "$$(printf '%s' "$$snaps" | tr -d '[:space:]')" = "[]" ]; then
           echo "[restic-restore] repository is empty (first-ever deployment), nothing to restore"
           mark_done
+          trace "exit: repository empty"
           exit 0
         fi
 
@@ -458,12 +342,20 @@ services:
         # must therefore also run against /opt/data, or the restore lands
         # elsewhere and this volume silently stays empty.
         echo "[restic-restore] restoring latest snapshot for host $$RESTIC_HOST"
+
+        # Claim the restore only once it is about to write. Claiming any earlier
+        # -- before the reachability check above -- would strand the marker on a
+        # machine whose volume was never touched, and the next boot would read
+        # that as "partial tree" and restore destructively over live data.
+        echo "$$BOOT_ID" > "$$INPROGRESS"
+        trace "restore started"
         restic restore latest --host "$$RESTIC_HOST" --target / --overwrite always
 
         count=$$(find /opt/data -type f | wc -l)
         size=$$(du -sh /opt/data | awk '{print $$1}')
         echo "[restic-restore] complete: $$count files, $$size"
         mark_done
+        trace "exit: restored $$count files ($$size)"
     environment:
       - HOME=/tmp
       - RESTIC_CACHE_DIR=/tmp/restic-cache
@@ -596,19 +488,33 @@ services:
             # that is still being restored. No clock involved -- see the shell
             # waiters for why that matters on a TDX VM.
             marker = root / ".restore-complete"
+            inprogress = root / ".restore-inprogress"
             with open("/proc/sys/kernel/random/boot_id") as fh:
                 bootid = fh.read().strip()
-            waited = 0
-            while not stopping:
+
+            def reads(path):
                 try:
-                    if marker.read_text().strip() == bootid:
-                        trace(f"proceeded after {waited}s")
-                        print("[db-snapshot] restore sentinel is fresh, proceeding")
-                        return True
+                    return path.read_text().strip()
                 except OSError:
-                    pass
+                    return None
+
+            waited = stalled = 0
+            while not stopping:
+                if reads(marker) == bootid:
+                    trace(f"proceeded after {waited}s")
+                    print("[db-snapshot] restore sentinel is fresh, proceeding")
+                    return True
+                # Same rule as restic-backup: the bound measures time with no
+                # restore running, so a slow first-ever restore is never timed
+                # out from under us.
+                stalled = 0 if reads(inprogress) == bootid else stalled + 5
+                if stalled >= int(os.environ.get("WAIT_MAX", "1200")):
+                    trace(f"gave up waiting after {waited}s")
+                    print(f"[db-snapshot] WARN: no restore sentinel or activity "
+                          f"for {stalled}s, proceeding", file=sys.stderr)
+                    return True
                 if waited % 60 == 0:
-                    print(f"[db-snapshot] waiting for rclone-restore to finish ({waited}s)")
+                    print(f"[db-snapshot] waiting for restic-restore to finish ({waited}s)")
                 time.sleep(5)
                 waited += 5
             return False
@@ -634,8 +540,8 @@ services:
     platform: linux/amd64
     restart: unless-stopped
     entrypoint: /bin/sh
-    # Gated at the END of the boot chain (rclone-restore -> cache-prune), not on
-    # restic-restore. Backing up a half-restored or half-pruned volume would
+    # Gated at the END of the boot chain (restic-restore -> cache-prune).
+    # Backing up a half-restored or half-pruned volume would
     # archive incomplete data, and once retention ages out the good snapshots
     # that is all that would remain. This direction of dependency cannot delay
     # hermes — nothing depends on restic-backup.
@@ -652,23 +558,35 @@ services:
         trace start
         wait_for_restore() {
           marker=/opt/data/.restore-complete
+          inprogress=/opt/data/.restore-inprogress
           bootid=$$(cat /proc/sys/kernel/random/boot_id)
           waited=0
+          stalled=0
           while :; do
             if [ "$$(cat "$$marker" 2>/dev/null)" = "$$bootid" ]; then
               trace "proceeded after $${waited}s"
               echo "[backup] restore sentinel is fresh, proceeding"
               return 0
             fi
-            if [ "$$waited" -ge "$${WAIT_MAX:-1200}" ]; then
+            # The timeout measures time with NO restore running, not wall-clock.
+            # A first-ever restore pulls the whole repository and can legitimately
+            # outlast any fixed bound; timing that out would snapshot the partial
+            # tree it was still writing. So the clock only advances while the
+            # in-progress marker says nothing is happening.
+            if [ "$$(cat "$$inprogress" 2>/dev/null)" = "$$bootid" ]; then
+              stalled=0
+            else
+              stalled=$$(( stalled + 5 ))
+            fi
+            if [ "$$stalled" -ge "$${WAIT_MAX:-1200}" ]; then
               trace "gave up waiting after $${waited}s, backing up unverified"
-              echo "[backup] WARN: no restore sentinel after $${waited}s." >&2
+              echo "[backup] WARN: no restore sentinel or activity for $${stalled}s." >&2
               echo "[backup] WARN: backing up anyway, tagged restore-unverified." >&2
               UNVERIFIED=1
               return 0
             fi
             [ $$(( waited % 60 )) -eq 0 ] && \
-              echo "[backup] waiting for rclone-restore to finish ($${waited}s)"
+              echo "[backup] waiting for restic-restore to finish ($${waited}s)"
             sleep 5; waited=$$(( waited + 5 ))
           done
         }
@@ -724,8 +642,9 @@ services:
         /opt/data/*.db-wal
         /opt/data/*.db-shm
         /opt/data/db-snapshots/*.tmp
-        # Boot sentinel: local coordination state, never restored.
+        # Boot coordination state: local to one machine, never restored.
         /opt/data/.restore-complete
+        /opt/data/.restore-inprogress
         # Generic build and virtualenv noise, at any depth.
         **/node_modules
         **/__pycache__

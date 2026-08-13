@@ -44,10 +44,10 @@ trust-root:
 obscure value:
     @docker run --rm rclone/rclone:1.69@sha256:1f497a86a6466395e62a5886613a14b7b18809543566ef9fa35fa1371a7ecc0f obscure '{{value}}'
 
-# Peek into the encrypted Akave bucket via the running sync sidecar.
-# Filenames you see are decrypted; on the bucket itself they're ciphertext.
-inspect-bucket:
-    docker compose exec rclone-sync rclone lsf crypt:
+# The rclone sidecars were removed at the restic cutover, so there is no
+# container to exec into. Use `just restic ls latest` for the live backup;
+# `just test-akave` still reaches the legacy Akave bucket for rollback.
+# (removed: inspect-bucket)
 
 # Smoke-test the Akave connection (creds, bucket, crypt round-trip) locally,
 # using the same pinned rclone image + env mapping as the sidecars.
