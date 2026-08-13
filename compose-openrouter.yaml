@@ -862,7 +862,24 @@ services:
         /opt/data/*.db
         /opt/data/*.db-wal
         /opt/data/*.db-shm
+        # These rules are anchored, so the root-level ones above never matched
+        # the per-profile databases. Measured on a recovery drill: 16 live
+        # SQLite files were in the backup, including a 443 MB state.db and its
+        # 163 MB WAL, copied hot -- exactly the torn-write risk the VACUUM INTO
+        # copies exist to avoid, and stored alongside a clean copy of the same
+        # data. restic-restore reinstates them from db-snapshots/, so excluding
+        # the live files loses nothing.
+        /opt/data/profiles/*/*.db
+        /opt/data/profiles/*/*.db-wal
+        /opt/data/profiles/*/*.db-shm
+        /opt/data/cron/*.db
+        /opt/data/cron/*.db-wal
+        /opt/data/cron/*.db-shm
         /opt/data/db-snapshots/*.tmp
+        # Package-store and browser-PKI databases, at any depth: the anchored
+        # home/ rules below miss the copies under profiles/*/home/.
+        **/.local/share/pnpm
+        **/.local/share/pki
         # Boot coordination state: local to one machine, never restored.
         /opt/data/.restore-complete
         /opt/data/.restore-inprogress
