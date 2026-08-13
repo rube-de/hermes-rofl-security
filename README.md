@@ -14,13 +14,13 @@ Ethereum addresses can reach it. See "Dashboard access" below.
 | File                     | Origin              | Purpose                                                      |
 | ------------------------ | ------------------- | ------------------------------------------------------------ |
 | `rofl.yaml`              | `oasis rofl init`   | TEE manifest. Resources tuned to ~playground_short.          |
-| `compose.yaml`           | edited after init   | Default deployment — GLM + Akave + wallet-gated dashboards.  |
+| `compose.yaml`           | edited after init   | Default deployment — GLM + R2 backup + wallet-gated dashboards. |
 | `compose-openrouter.yaml`| this repo           | Alternative deployment — Hermes against OpenRouter.          |
 | `.env.example`           | this repo           | Names of the secrets you must `secret import`.               |
 | `justfile`               | this repo           | Wrappers around the `oasis rofl ...` sequence.               |
 
-Both compose files share a core shape: the pinned Hermes image plus two rclone
-sidecars (see "Persistent storage" below) and a small `command:` wrapper. On
+Both compose files share a core shape: the pinned Hermes image plus the restic
+backup services (see "Persistent storage" below) and a small `command:` wrapper. On
 the very first boot — when no sentinel marker (`/opt/data/.compose-initialized`)
 exists yet — the wrapper writes a default `config.yaml` from the heredoc and
 drops the marker. On every subsequent boot it leaves `config.yaml` alone, so
@@ -59,14 +59,14 @@ The model is hard-coded in each compose's inline heredoc — but only as a
 **first-boot default**. Once `config.yaml` exists and the
 `.compose-initialized` sentinel is dropped (after the first successful boot,
 within seconds), the compose stops touching it. Edits made in `config.yaml`
-at runtime persist through Akave sync and survive machine replacement. So:
+at runtime are backed up to R2 and survive machine replacement. So:
 
 - Pick the right default in compose if you don't want to log in and edit
   things after first deploy.
 - For everything after that, change the model by editing
   `/opt/data/config.yaml` directly in the running container (or via
-  whatever Hermes UI you use) — the change will be synced to Akave on the
-  next cycle.
+  whatever Hermes UI you use) — the change is picked up by the next backup
+  cycle.
 - To reset to compose defaults: delete `/opt/data/.compose-initialized` and
   restart the hermes service.
 
@@ -150,8 +150,8 @@ running the bundle you built.
   (9119); both, plus Hermes' OpenAI-compatible Gateway API (8642), stay
   unpublished, so the gateway is the sole perimeter. `compose-openrouter.yaml`
   publishes nothing — Telegram is outbound long-polling.
-- **Pin images by digest for production.** The two `rclone` sidecars are already
-  pinned (`rclone:1.69@sha256:…`), but the app images in `compose.yaml` —
+- **Pin images by digest for production.** The backup services are already
+  pinned (`restic:0.17.3@sha256:…`), but the app images in `compose.yaml` —
   `hermes`, `hermes-dashboard`, `hermes-security-dashboard`, and the
   `wallet-gateway` — track floating `:latest` tags for convenience. That's fine
   while iterating, but **in
@@ -165,58 +165,61 @@ running the bundle you built.
 - **Switching compose files rotates the enclave ID.** Any client that pinned
   the previous attestation will need to re-trust the new identity.
 
-## Persistent storage (Akave + rclone)
+## Persistent storage (Cloudflare R2 + restic)
 
 ROFL `disk-persistent` storage is leased to a specific machine. When that lease
 ends (funding runs out, you destroy the machine, the scheduler relocates it),
-the disk goes with it. To survive that, Hermes's `/opt/data` is mirrored to
-[Akave Cloud](https://console.akave.com/) — an S3-compatible, Filecoin-backed
-bucket — through two rclone sidecars defined in `compose.yaml`:
+the disk goes with it. To survive that, Hermes's `/opt/data` is backed up to a
+[Cloudflare R2](https://dash.cloudflare.com/) bucket with
+[restic](https://restic.net/), via three services in `compose.yaml`:
 
-- `rclone-restore` — one-shot init container. On boot, pulls everything from
-  the encrypted bucket into the local `hermes-data` volume. `hermes` waits
-  on this via `depends_on: condition: service_completed_successfully` — it
-  doesn't start serving until restore completes.
-- `rclone-sync` — long-running sidecar. Every `SYNC_INTERVAL` seconds
-  (default 300), syncs the local volume back to the bucket. On `SIGTERM` it
-  performs one final flush before exiting, so `docker compose down` doesn't
-  lose unsynced writes.
+- `restic-restore` — one-shot init container, the head of the boot chain.
+  Restores the newest snapshot, but **only onto an empty volume**. A machine
+  that already holds data is left alone, because restic restores with
+  `--overwrite always` and a second pass would revert live agent state to the
+  last snapshot. Everything else waits on the sentinel it publishes.
+- `db-snapshot` — every `DB_SNAPSHOT_INTERVAL` seconds (default 1800), writes a
+  clean copy of each live SQLite database to `db-snapshots/` with `VACUUM INTO`.
+  The live files themselves are excluded from the backup: copying a hot SQLite
+  file can capture a torn write.
+- `restic-backup` — every `BACKUP_INTERVAL` seconds (default 3600), snapshots
+  the volume. Every 24th cycle it applies retention (`--keep-hourly 24
+  --keep-daily 7 --keep-weekly 4 --keep-monthly 6`) and prunes.
 
-Encryption is client-side via `rclone crypt`. Akave only ever sees ciphertext
-— filenames and contents are encrypted with a passphrase + salt you generate
-locally and inject as ROFL secrets. **If you lose both the passphrase and the
-salt, every file in the bucket is unrecoverable.**
+This replaced an `rclone sync` mirror. The reason is that a mirror is not a
+backup: it has no restore points, so anything that corrupts or deletes data
+locally is faithfully copied to the remote on the next cycle, overwriting the
+last good copy. restic keeps content-addressed, deduplicated snapshots, so you
+can restore the state from before the damage.
+
+Encryption is client-side and always on — restic encrypts every blob before it
+leaves the machine, so Cloudflare only ever sees ciphertext. **`RESTIC_PASSWORD`
+is the only thing that can decrypt the repository. Lose it and every snapshot is
+unrecoverable; there is no recovery path and no second factor.** Store it in a
+password manager before the first deploy. Note it is used *raw* — unlike the
+old `RCLONE_CRYPT_*` values, it must **not** be passed through `just obscure`.
 
 Hermes runs as user `hermes` (UID 10000) whose HOME is `/opt/data`, so any
 CLI tool it invokes (codex, claude-code, …) lands its config and OAuth
 tokens under `/opt/data/.codex/`, `/opt/data/.claude/`, etc. — all of that
-is inside the synced volume. Nothing extra to wire up for auxiliary
+is inside the backed-up volume. Nothing extra to wire up for auxiliary
 providers' auth state.
 
 `config.yaml` is full Hermes configuration (model selection, auxiliary
 providers added via OAuth, skill settings, hooks, channel prompts, …) —
-all of that survives machine replacement via sync. The compose only writes
-to `config.yaml` on the very first boot, gated by the
+all of that survives machine replacement. The compose only writes to
+`config.yaml` on the very first boot, gated by the
 `/opt/data/.compose-initialized` sentinel file. Once that marker exists
 (which happens within the first few seconds of the initial deploy and is
-itself synced to Akave), subsequent boots leave `config.yaml` entirely
-alone — the user/agent is the sole writer.
+itself backed up), subsequent boots leave `config.yaml` entirely alone —
+the user/agent is the sole writer.
 
-The following are deliberately excluded from sync (regenerable, or owned
-by the running container):
-
-- `logs/**` — runtime logs, unbounded growth, no restore value
-- `.cache/**`, `.npm/**`, `node_modules/**` — package/tool caches
-- `__pycache__/**`, `*.pyc`, `.pytest_cache/**`, `.mypy_cache/**`,
-  `.ruff_cache/**`, `.tox/**`, `.venv/**` — Python build artifacts
-- `security/live/**` — the security dashboard's live SQLite DB (`.db`/`-wal`/
-  `-shm`). Copying a live SQLite file with rclone is unsafe, so only its
-  point-in-time snapshot (`security/snapshot.db`, written via `VACUUM INTO`) is
-  synced; the dashboard rebuilds the live DB from it on boot.
-
-  (Patterns are intentionally *unanchored* — `.cache/**`, not `**/.cache/**`.
-  Hermes's HOME is the sync root `/opt/data`, so its caches sit at the root;
-  rclone's `**/` prefix requires a parent directory and would miss them.)
+The exclude list lives inline in the `restic-backup` service. Broadly, it drops
+regenerable caches and checkouts (`repo/`, `cache/`, `logs/`, `toolchains/`,
+`node_modules`, `.venv`, `__pycache__`, …), the live SQLite files in favour of
+the `VACUUM INTO` copies, and the machine-namespaced runtime state that Hermes'
+own `backup.py` skips on import — `gateway_state.json` above all, since a stale
+value leaves the gateway stuck "starting" and disconnected from the portal.
 
 There's also a `/opt/data/vault/` directory created on Hermes boot — drop any
 file you want preserved across machine replacement into it (or anywhere
@@ -224,30 +227,35 @@ under `/opt/data/` except the excluded paths).
 
 ### One-time setup
 
-1. Create a bucket and an access key pair at <https://console.akave.com/>.
-   The console gives you a per-credential endpoint URL — copy that too.
+1. Create a bucket and an S3 API token at
+   <https://dash.cloudflare.com/> → R2. Scope the token to that one bucket with
+   **Object Read & Write**. The Secret Access Key is shown **once** — copy it
+   immediately. You also need your R2 Account ID from the same page.
 
-2. Generate the crypt passphrase and salt locally. Use long random values;
-   they're the only thing standing between Akave and your plaintext:
+2. Generate the repository password locally. This is the single point of total
+   data loss, so treat it accordingly:
 
    ```sh
-   just obscure "$(openssl rand -base64 48)"   # password
-   just obscure "$(openssl rand -base64 32)"   # salt
+   openssl rand -base64 48        # -> RESTIC_PASSWORD, save in a password manager
    ```
 
-   Both lines print an obscured string. Copy each into the matching
-   `RCLONE_CRYPT_*` slot in `.env`. **Save the original (un-obscured) values
-   in a password manager** — you cannot recover them from the obscured form
-   and you'll need them again if you ever restore outside this stack.
+   Do **not** run it through `just obscure` — that is an rclone-only encoding
+   and restic would take the obscured text as the literal password.
 
-3. Fill in the rest of `.env` (Akave + existing Hermes secrets), then push
-   the whole bundle on-chain and republish the manifest:
+3. Fill in `.env` (R2 + existing Hermes secrets), create the repository once,
+   then push the bundle on-chain:
 
    ```sh
    cp .env.example .env       # then edit
+   just restic-init           # one-time; safe to re-run, never runs on the boot path
+   just test-r2               # creds + integrity + backup round-trip
    just set-secrets           # = oasis rofl secret import --force .env
    just update                # publishes the updated manifest
    ```
+
+   `restic init` is deliberately kept off the boot path: run there, any
+   transient error would silently create a second empty repository beside the
+   real one, and backups would start accumulating in the wrong place.
 
 ### Rotating a single secret
 
@@ -255,80 +263,89 @@ Reading a value into the CLI via file avoids putting it in shell history:
 
 ```sh
 printf '%s' "$NEW_VALUE" > /tmp/secret && \
-  oasis rofl secret set AKAVE_SECRET_KEY /tmp/secret && \
+  oasis rofl secret set R2_SECRET_ACCESS_KEY /tmp/secret && \
   rm /tmp/secret
 just update
 ```
 
 Or rotate the whole bundle: edit `.env`, `just set-secrets && just update`.
 
-### Bootstrapping from existing local data
+Changing a secret *value* needs `secret set` + `just update` + `just restart`.
+A compose *edit* needs the full `just ship` — a restart reuses the old enclave.
 
-If you already have a populated Hermes data dir you want to seed the bucket
-with, run rclone locally once before the first ROFL deploy:
+### Inspecting and restoring
 
 ```sh
-# With the same env vars set locally (export AKAVE_*, RCLONE_CRYPT_*)
-docker run --rm \
-  -v "$HOME/.hermes:/sync" \
-  -e RCLONE_CONFIG_AKAVE_TYPE=s3 -e RCLONE_CONFIG_AKAVE_PROVIDER=Other \
-  -e RCLONE_CONFIG_AKAVE_REGION=akave-network \
-  -e RCLONE_CONFIG_AKAVE_ENDPOINT="$AKAVE_ENDPOINT" \
-  -e RCLONE_CONFIG_AKAVE_ACCESS_KEY_ID="$AKAVE_ACCESS_KEY" \
-  -e RCLONE_CONFIG_AKAVE_SECRET_ACCESS_KEY="$AKAVE_SECRET_KEY" \
-  -e RCLONE_CONFIG_AKAVE_FORCE_PATH_STYLE=true \
-  -e RCLONE_CONFIG_CRYPT_TYPE=crypt \
-  -e RCLONE_CONFIG_CRYPT_REMOTE="akave:$AKAVE_BUCKET" \
-  -e RCLONE_CONFIG_CRYPT_FILENAME_ENCRYPTION=standard \
-  -e RCLONE_CONFIG_CRYPT_PASSWORD="$RCLONE_CRYPT_PASSWORD" \
-  -e RCLONE_CONFIG_CRYPT_PASSWORD2="$RCLONE_CRYPT_SALT" \
-  rclone/rclone:1.69 sync /sync crypt: \
-    --exclude=config.yaml --exclude=logs/**
+just restic-snapshots                  # restore points, newest last
+just restic ls latest                  # what's in the newest snapshot
+just restic dump latest /opt/data/.boot-trace   # boot ordering of the last boot
+just restic stats                      # repository size
+```
+
+To restore onto a machine that already holds data — which `restic-restore`
+refuses to do on its own, by design — say so explicitly:
+
+```sh
+docker compose run --rm -e RESTIC_FORCE_RESTORE=1 restic-restore
 ```
 
 ### Verifying it works
 
 1. Deploy, wait until `just logs` shows Hermes long-polling Telegram.
 2. Send the bot a message or two so there's a non-trivial session on disk.
-3. Wait one `SYNC_INTERVAL`, then `just inspect-bucket` — you should see
-   filenames (decrypted via the sidecar's crypt remote).
+3. Wait one `BACKUP_INTERVAL`, then `just restic-snapshots` — a new snapshot
+   should appear, with host `rofl` and no `restore-unverified` tag.
 4. `oasis rofl machine remove` to destroy the lease.
 5. `just deploy` to spawn a new machine, `just logs` to follow.
 6. The new bot session continues prior conversations — state restored.
 
-To verify encryption directly, read the bucket via the underlying S3
-remote (no crypt unwrapping):
+The `restore-unverified` tag is worth watching for: it means `restic-backup`
+gave up waiting for the restore sentinel and snapshotted anyway, so that
+snapshot may hold a partial tree.
 
-```sh
-docker compose exec rclone-sync rclone lsf akave:$AKAVE_BUCKET
-```
-
-Filenames here are ciphertext (base32-encoded encrypted blobs).
+The bucket itself is opaque: restic stores content-addressed encrypted blobs
+under `data/`, so nothing about your filenames or directory layout is visible
+to Cloudflare.
 
 ### Debugging
 
-- Inspect bucket contents (decrypted view):
-  `just inspect-bucket`
-- Read sidecar logs: `docker compose logs rclone-sync` (locally) or
+- List restore points / contents: `just restic-snapshots`, `just restic ls latest`.
+- Read backup logs: `docker compose logs restic-backup` (locally) or
   `just logs` (on ROFL).
 - Confirm a secret is present in the on-chain manifest:
-  `oasis rofl secret get AKAVE_ACCESS_KEY`
-- If restore fails on boot, the hermes service won't start. Check
-  `docker compose logs rclone-restore` for the failing rclone command.
+  `oasis rofl secret get R2_ACCESS_KEY_ID`
+- If restore fails on boot, `restic-restore` exits non-zero and publishes no
+  sentinel, so the waiters keep waiting. Check `docker compose logs
+  restic-restore`. It fails **closed** on purpose: `restic snapshots` exits
+  non-zero for an absent repository, wrong credentials and network failure
+  alike, so "cannot reach the repository" is never read as "nothing to restore".
+- Reconstruct the boot ordering after the fact — ROFL only captures stdout from
+  some containers, so each service also appends to a trace file on the volume:
+  `just restic dump latest /opt/data/.boot-trace`
+- A stale lock (the machine was killed mid-backup) does not block the next
+  backup, but does block `forget --prune`. `restic-backup` clears it with
+  `restic unlock --remove-all` before each retention run.
 
 ### Operational notes
 
-- **Single-writer assumption.** Only one ROFL machine should be syncing to
-  a given bucket at a time. Concurrent writers will fight and corrupt
-  Hermes session files (Hermes itself warns against this).
-- **Encryption key rotation** is out of scope. If you need to rotate the
-  crypt password/salt, the procedure is: stop the stack, run rclone with
-  the old crypt config to download to a temp dir, generate new keys,
-  re-upload with the new crypt config. Document and script this when you
-  actually need it.
+- **Single-writer assumption.** Only one ROFL machine should back up to a given
+  repository at a time. Concurrent writers will fight and corrupt Hermes session
+  files (Hermes itself warns against this). It is also what makes
+  `restic unlock --remove-all` safe here.
+- **The host is pinned to `rofl` deliberately.** restic groups retention by
+  `(host, paths)`, and every container gets a random hostname. Without the pin,
+  each run forms its own retention group and `restic forget` deletes **nothing**
+  while still exiting 0 — measured: `--keep-last 2` left all 6 snapshots.
+- **Backup staleness is not alerted on.** Nothing pages you if snapshots stop
+  arriving; check `just restic-snapshots` periodically. A fail-closed restore
+  bug once turned into a silent 17-hour gap this way.
+- **Encryption key rotation** is out of scope. restic supports adding a second
+  key to a repository (`restic key add`), which is the starting point if you
+  need it — but the existing snapshots stay encrypted to the master key either
+  way. Document and script this when you actually need it.
 - **Caches accumulate.** If skills install large dependencies (npm,
   Python venvs), check the exclude list above — extend it if a new tool
-  introduces a cache pattern that should never be synced.
+  introduces a cache pattern that should never be backed up.
 
 ## Dashboard access (wallet gateway)
 
@@ -407,9 +424,10 @@ host until the machine exists. So bringup is two-phase:
 
 `hermes-dashboard` and `hermes` both mount the `hermes-data` volume, so the
 dashboard sees the same agent state the Telegram bot uses, and edits made there
-sync to Akave like everything else. Note: only `hermes` waits on
-`rclone-restore`; the dashboard may start against a not-yet-restored
-`/opt/data`, but it shares the live volume and picks state up as restore lands.
+are backed up like everything else. Both wait on `restic-restore` (via
+`cache-prune`), so neither starts against a half-restored `/opt/data` — and in
+the ordinary case, where the volume survived the reboot, the restore is a
+sub-second no-op.
 
 ### Security dashboard (`/security`)
 
@@ -443,8 +461,11 @@ service here, or otherwise on the same Docker network) — not from outside.
 **Durability.** The dashboard keeps its SQLite DB in WAL mode under
 `security/live/` (excluded from sync) and emits a consistent `VACUUM INTO`
 snapshot at `security/snapshot.db` every `HERMES_SNAPSHOT_INTERVAL` seconds and
-on shutdown. Only that snapshot rides the Akave sync; on a fresh machine the
-dashboard restores the live DB from it before serving. See "Persistent storage".
+on shutdown. Only that snapshot is backed up; on a fresh machine the dashboard
+restores the live DB from it before serving. `db-snapshot` deliberately skips
+both paths — `security/live/` because it is the hot DB, and
+`security/snapshot.db` because copying it would be snapshotting a snapshot.
+See "Persistent storage".
 
 ## References
 
@@ -452,7 +473,7 @@ dashboard restores the live DB from it before serving. See "Persistent storage".
 - Hermes providers — <https://hermes-agent.nousresearch.com/docs/integrations/providers>
 - ROFL quickstart — <https://docs.oasis.io/build/rofl/quickstart/>
 - ROFL containerize rules — <https://docs.oasis.io/build/rofl/workflow/containerize-app/>
-- Akave Cloud / O3 — <https://docs.akave.xyz/>
-- rclone crypt — <https://rclone.org/crypt/>
+- Cloudflare R2 S3 API — <https://developers.cloudflare.com/r2/api/s3/api/>
+- restic — <https://restic.readthedocs.io/>
 - Wallet gateway (SIWE) — <https://github.com/rube-de/hermes-wallet-gateway>
 - Security dashboard — <https://github.com/rube-de/hermes-security-dashboard>

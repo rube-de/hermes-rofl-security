@@ -1,19 +1,22 @@
 # restic migration (Akave + rclone → Cloudflare R2 + restic)
 
-**Status: repo-side work implemented and tested; NOT cut over.**
+**Status: CUT OVER. restic on R2 is the only backup path; rclone is gone.**
 
 Done:
 
 - `.env.example` — `R2_*`, `RESTIC_PASSWORD`, `BACKUP_INTERVAL` documented
 - `compose.yaml` + `compose-openrouter.yaml` — `restic-restore`, `db-snapshot`,
-  `restic-backup` added **alongside** the rclone pair
+  `restic-backup`; `rclone-restore` and `rclone-sync` **deleted**
 - `scripts/_restic-common.sh`, `restic-init.sh`, `test-r2.sh`, `restic-run.sh`
-- `justfile` — `restic-init`, `test-r2`, `restic-snapshots`, `restic`
-- R2 repository created and verified (`just test-r2 --read-only` passes: opens, empty,
-  `restic check` clean)
+- `justfile` — `restic-init`, `test-r2`, `restic-snapshots`, `restic`; `inspect-bucket`
+  removed (it exec'd into the deleted sync sidecar)
+- `README.md` — storage section rewritten for R2 + restic
+- R2 repository created and verified; 4 snapshots taken in production before cutover,
+  all host `rofl`, 1.869 GiB each against 4.3 G on disk
 
-Not done, deliberately: the rclone services are still the authoritative backup path, and
-nothing depends on the restic services. Cutover is Part G.
+Deliberately **not** done: the Akave secrets are still in the manifest and the bucket
+still holds the pre-cutover data. That is the rollback path; retire it only once restic
+has proven itself across a machine replacement.
 
 ---
 
@@ -78,14 +81,23 @@ picks these up. Removing the Akave ones later needs explicit `oasis rofl secret 
 
 Three services, identical in both compose files.
 
-### `restic-restore` — behind `profiles: ["restore"]`
+### `restic-restore` — head of the boot chain
 
-**Does not start on `docker compose up`.** While `rclone-restore` is still authoritative,
-two restore services writing one volume would race. Run it deliberately:
+Three guards, in this order. `RESTIC_FORCE_RESTORE=1` bypasses all of them.
 
-```sh
-docker compose run --rm restic-restore
-```
+1. **Sentinel matches this boot** → nothing to do. Written only on success, keyed to
+   `/proc/sys/kernel/random/boot_id`, so a failed restore leaves no marker and the next
+   invocation retries.
+2. **A sibling invocation is restoring right now** → wait for its verdict, then exit.
+3. **The volume already holds data** → do not restore. restic restores with
+   `--overwrite always`, so running against a machine holding live state would revert it
+   to the last snapshot. A fresh machine has an empty volume and *is* restored — that is
+   the disaster-recovery path.
+
+Guard 3 has one exception: an in-progress marker left by an **earlier** boot means that
+boot began a restore and never finished, so the volume holds a partial tree and must be
+restored over. Without it, a machine killed mid-restore would look "populated" to every
+later boot and stay permanently half-restored.
 
 The boot guard **fails closed**, which is the part that matters:
 
@@ -149,16 +161,16 @@ restic proves staleness from hostname+PID and the hostname differs every run.
 
 ### `depends_on`
 
-`db-snapshot` and `restic-backup` gate on **`rclone-restore`**, the authoritative restore
-path — not on `restic-restore`. Backing up a half-restored volume produces a valid-looking
-snapshot of incomplete data, and after 24 cycles retention could age out the good snapshots
-and leave only those. This dependency direction cannot delay `hermes`: nothing depends on
-the restic services.
+`restic-restore` → `cache-prune` → everything else. Backing up a half-restored volume
+produces a valid-looking snapshot of incomplete data, and after 24 cycles retention could
+age out the good snapshots and leave only those.
 
-**Still open — pre-existing race, not introduced here:** `cache-prune` depends on nothing
-and can delete paths while `rclone-restore` is writing them. Fix it at cutover by gating it
-on the restore service. Once regenerable data is excluded from the backup this becomes
-harmless, but it is live today.
+`depends_on` alone does not enforce this: podman-compose starts dependents **regardless**
+of a `service_completed_successfully` condition. So `cache-prune`, `db-snapshot` and
+`restic-backup` each additionally block on the sentinel file. Their timeout measures time
+with **no restore running** rather than wall-clock, so a slow first-ever restore is never
+timed out from under them — a fixed 20-minute bound would otherwise snapshot the partial
+tree it was still writing.
 
 ---
 
@@ -227,21 +239,24 @@ did not drop something load-bearing. Nothing else substitutes for it.
 
 ---
 
-## Part G — cutover (not started)
+## Part G — cutover ✅
 
-1. `just set-secrets` — push the R2 values to the enclave
-2. Deploy with restic **alongside** rclone; let backups accumulate; run `just test-r2`
-3. Do Part F step 4 — replace the machine, restore, verify
-4. Only then: delete `rclone-restore`/`rclone-sync`, drop `profiles:` from
-   `restic-restore`, repoint every `depends_on` at it, and gate `cache-prune` on it
-5. `just ship`
-6. Retire the Akave secrets (`oasis rofl secret rm`) and delete the bucket — last
+1. ✅ `just set-secrets` — R2 values pushed to the enclave
+2. ✅ Deployed alongside rclone; 4 snapshots accumulated and verified in R2
+3. ✅ Restore verified end-to-end against a local MinIO standing in for R2 — wipe the
+   volume, restore, `pragma integrity_check` = `ok`, 500/500 rows. **A machine
+   replacement on real R2 has not been done**; that is the one step still owed.
+4. ✅ `rclone-restore`/`rclone-sync` deleted, `profiles:` dropped from `restic-restore`,
+   `depends_on` repointed, `cache-prune` gated on it
+5. ✅ `just ship`
+6. ⬜ Retire the Akave secrets (`oasis rofl secret rm`) and delete the bucket — deferred
+   on purpose, this is the rollback path
 
 The enclave ID rotates at step 5 because the compose file is part of the attested bundle;
-anything pinning the old attestation must re-trust (documented in `README.md`). Adding the
-restic services at step 2 also rotates it.
+anything pinning the old attestation must re-trust (documented in `README.md`).
 
-**Rollback** until step 6: `git revert` + `just ship`. Akave still holds the data.
+**Rollback** until step 6: `git revert` + `just ship`. Akave still holds the pre-cutover
+data, and the live volume still holds the current data.
 
 ---
 
@@ -296,12 +311,17 @@ The chain is now `rclone-restore` → `cache-prune` → everything else.
 
 ## Open items
 
-- Regenerable data is still **in the rclone bucket** (`repo/`, `toolchains/`, the pnpm
-  store): the live exclude list uses `.cache/**` with a dot, which does not match
-  `/opt/data/cache` or `profiles/*/cache`. `just purge-bucket-cruft` exists for this. The
-  restic exclude list already handles it, so this retires at cutover.
-- `rofl.yaml` declares `resources.storage.size: 17000` while the machine showed 15.2 G
-  usable — unrelated, still unexplained.
+- **No alerting on backup staleness.** Nothing pages if snapshots stop arriving. A
+  fail-closed restore bug turned into a silent 17-hour gap exactly this way, found only
+  because it was checked by hand.
+- **~5 G of disk unaccounted for**: the data volume is 4.3 G of 11.3 G used. The
+  `disk-report` diagnostic never produced output before it was removed.
+- **A real machine replacement on R2 has not been exercised.** Restore is proven against
+  MinIO and against the concurrency case, not against a destroyed-and-recreated ROFL lease.
+- Akave bucket and secrets still live, deliberately (rollback).
+
+`rofl.yaml` declaring `storage.size` above usable disk is **by design** — ROFL itself
+needs part of the disk. Not a bug; do not re-flag it.
 
 ## Bug found by running the full test
 
@@ -315,6 +335,28 @@ Fixed by forgetting the explicit snapshot ID. The obvious alternative,
 would take real snapshots with it; explicit IDs cannot do that.
 
 Only the full `just test-r2` catches this — `--read-only` skips step 4 entirely.
+
+## Bug found by testing the cutover under concurrency
+
+podman-compose re-executes a `service_completed_successfully` dependency **once per
+dependent** — measured: 8 `rclone-restore` runs in one boot. After the cutover four
+services gate on `restic-restore`, so several invocations are alive at once.
+
+The original guard 3 called `mark_done()` when it found a populated volume. On a fresh
+machine that is wrong: invocation #1 starts a real restore, invocation #2 sees the files
+#1 has written *so far*, concludes "already holds data", and publishes the sentinel while
+the restore is still running. Every waiter is then released onto a partial tree, and
+`restic-backup` snapshots it — on precisely the disaster-recovery path the guard exists to
+protect.
+
+Fixed with an in-progress marker rather than a lock: the residual race (two invocations
+restoring the same snapshot concurrently) writes identical bytes and is harmless, while a
+false sentinel is not.
+
+Reproduced and verified with 4 overlapping invocations against a throttled 300 MB restore.
+The sentinel now appears at 301/301 files. A mutant with only the marker write disabled
+fails the same test — sentinel at 0/301 while the restore ran on for another 48 s — so the
+test discriminates rather than passing vacuously.
 
 ## Note on how the repository got created
 
