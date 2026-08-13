@@ -47,11 +47,25 @@ services:
           mark_done
           exit 0
         fi
+        trace "disk $$(df -h /sync | awk 'NR==2{print $$3" used "$$4" free"}')"
+        trace "remote listed"
         echo "[restore] copying crypt: -> /sync"
+        # rclone's status is captured rather than left to `set -e`: this script's
+        # stdout is not captured by ROFL, so an aborted copy died invisibly and
+        # the sentinel was simply never written. The trace file is the only
+        # channel that survives.
+        set +e
         rclone copy crypt: /sync \
           --update --checksum \
           --log-level INFO \
           --stats 30s --stats-one-line
+        rc=$$?
+        set -e
+        trace "copy exited rc=$$rc"
+        if [ "$$rc" -ne 0 ]; then
+          echo "[restore] FATAL: copy failed rc=$$rc" >&2
+          exit 1
+        fi
         count=$$(find /sync -type f | wc -l)
         size=$$(du -sh /sync | awk '{print $$1}')
         echo "[restore] complete: $$count files, $$size"
@@ -646,13 +660,20 @@ services:
               echo "[backup] restore sentinel is fresh, proceeding"
               return 0
             fi
-            
+            if [ "$$waited" -ge "$${WAIT_MAX:-1200}" ]; then
+              trace "gave up waiting after $${waited}s, backing up unverified"
+              echo "[backup] WARN: no restore sentinel after $${waited}s." >&2
+              echo "[backup] WARN: backing up anyway, tagged restore-unverified." >&2
+              UNVERIFIED=1
+              return 0
+            fi
             [ $$(( waited % 60 )) -eq 0 ] && \
               echo "[backup] waiting for rclone-restore to finish ($${waited}s)"
             sleep 5; waited=$$(( waited + 5 ))
           done
         }
 
+        UNVERIFIED=""
         wait_for_restore
 
         PRUNE_EVERY=$${PRUNE_EVERY_CYCLES:-24}
@@ -733,7 +754,7 @@ services:
                --host "$$RESTIC_HOST" \
                --exclude-file=/tmp/restic-excludes \
                --exclude-caches \
-               --tag rofl; then
+               --tag rofl $${UNVERIFIED:+--tag restore-unverified}; then
             elapsed=$$(( $$(date +%s) - start ))
             echo "[backup] cycle complete in $${elapsed}s"
           else
