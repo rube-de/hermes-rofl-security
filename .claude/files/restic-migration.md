@@ -449,3 +449,40 @@ fail-safe against overwriting a live volume.
 
 Verified: dotfiles only -> restores; dotfiles plus one real file -> skips; a real
 subdirectory -> skips.
+
+
+## Recovery drill — 2026-08-13, against the real R2 repository
+
+Run locally with the real compose file and real credentials, restoring into a fresh
+**named volume** (not a bind mount — Docker only seeds image content into named volumes,
+and that seeding is exactly what the guard has to cope with).
+
+It found two defects that no previous test could reach, because every earlier test built
+its own fixtures rather than using the real repository and a real fresh volume.
+
+**1. The restore never put the databases back.** The backup deliberately holds the
+`VACUUM INTO` copies instead of the live SQLite files, but nothing reinstated them. First
+drill: `state.db` and `kanban.db` absent after a complete restore, while a 298 MB clean
+copy sat unused in `db-snapshots/`. A real recovery would have produced an agent with
+empty databases.
+
+**2. The exclude list was root-anchored.** `/opt/data/*.db` never matched
+`profiles/*/state.db`, so 16 live SQLite files were in the backup — a 443 MB `state.db`
+plus its 163 MB WAL, copied hot. That accident was also the *only* reason profile state
+survived a restore, which is why reinstatement had to ship first and the excludes second.
+
+### Result after both fixes
+
+    [restic-restore] databases reinstated: 7 restored, 0 already present
+    [restic-restore] complete: 9916 files, 2.1G
+
+All seven databases `integrity=ok` with expected table counts, no stray `-wal`/`-shm`,
+and the snapshot dropped from 1.870 GiB to 1.304 GiB.
+
+### Re-running it
+
+    scratchpad/dr-drill2.sh
+
+Scope it deliberately: restore reads R2, but `restic-backup` must never run against the
+production repository from a drill, and `hermes` must not start a second agent on the same
+Telegram token.

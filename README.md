@@ -187,6 +187,12 @@ the disk goes with it. To survive that, Hermes's `/opt/data` is backed up to a
   the volume. Every 24th cycle it applies retention (`--keep-hourly 24
   --keep-daily 7 --keep-weekly 4 --keep-monthly 6`) and prunes.
 
+The live SQLite files are excluded in favour of those clean copies, so
+`restic-restore` reinstates each one to its live path before publishing the
+sentinel — otherwise a recovered machine would come up with no databases at
+all. `db-snapshots/.manifest` records where each copy belongs; an existing
+live file is never overwritten.
+
 ### Why ordering is a sentinel and not `depends_on`
 
 `podman-compose` maps `condition: service_completed_successfully` onto podman's
