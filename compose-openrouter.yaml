@@ -43,6 +43,41 @@ services:
     # measured 300s each on the rclone path, and 1800s once the restore stopped
     # publishing a sentinel, which is the 40-minute boot. Ordering is the
     # sentinel's job -- see wait_for_restore in the services below.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        # Wait for the restore before serving. Without this a disaster-recovery
+        # boot starts against a volume still being restored.
+        marker=/opt/data/.restore-complete
+        inprogress=/opt/data/.restore-inprogress
+        bootid=$$(cat /proc/sys/kernel/random/boot_id)
+        waited=0
+        stalled=0
+        while [ "$$(cat "$$marker" 2>/dev/null)" != "$$bootid" ]; do
+          if [ "$$(cat "$$inprogress" 2>/dev/null)" = "$$bootid" ]; then
+            stalled=0
+          else
+            stalled=$$(( stalled + 5 ))
+          fi
+          if [ "$$stalled" -ge "$${WAIT_MAX:-1200}" ]; then
+            if [ -z "$$(find /opt/data -mindepth 1 \
+                          ! -name '.restore-*' ! -name .boot-trace \
+                          ! -name .bashrc ! -name .profile ! -name .bash_logout \
+                          -print -quit 2>/dev/null)" ]; then
+              echo "[hermes-dash] FATAL: volume empty and no restore after $${stalled}s" >&2
+              exit 1
+            fi
+            echo "[hermes-dash] WARN: no restore sentinel for $${stalled}s, starting" >&2
+            break
+          fi
+          [ $$(( waited % 60 )) -eq 0 ] && echo "[hermes-dash] waiting for restic-restore ($${waited}s)"
+          sleep 5
+          waited=$$(( waited + 5 ))
+        done
+        echo "$$(date -u +%FT%TZ) hermes-dash    proceeded after $${waited}s" >> /opt/data/.boot-trace 2>/dev/null || true
+        exec /opt/hermes/docker/entrypoint-dispatch.sh "$$@"
+      - "--"
     # Bind to all interfaces on the internal network. Hermes requires its own
     # auth provider for non-loopback binds, in addition to the wallet gateway.
     command:
@@ -74,6 +109,49 @@ services:
     image: ghcr.io/rube-de/hermes-security-dashboard:latest-security
     platform: linux/amd64
     restart: unless-stopped
+    # Wraps the image's own entrypoint rather than replacing its command, so the
+    # image CMD (["node","build"]) still reaches docker-entrypoint.sh untouched
+    # and the wrap cannot change what actually runs. This one matters more than
+    # the other dashboard: it rebuilds its live DB from security/snapshot.db at
+    # boot and writes that snapshot back every HERMES_SNAPSHOT_INTERVAL, so an
+    # ungated start on a recovering volume would overwrite the restored findings
+    # with an empty database.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        marker=/data/.restore-complete
+        inprogress=/data/.restore-inprogress
+        bootid=$$(cat /proc/sys/kernel/random/boot_id)
+        waited=0
+        stalled=0
+        while [ "$$(cat "$$marker" 2>/dev/null)" != "$$bootid" ]; do
+          if [ "$$(cat "$$inprogress" 2>/dev/null)" = "$$bootid" ]; then
+            stalled=0
+          else
+            stalled=$$(( stalled + 5 ))
+          fi
+          if [ "$$stalled" -ge "$${WAIT_MAX:-1200}" ]; then
+            if [ -z "$$(find /data -mindepth 1 \
+                          ! -name '.restore-*' ! -name .boot-trace \
+                          ! -name .bashrc ! -name .profile ! -name .bash_logout \
+                          -print -quit 2>/dev/null)" ]; then
+              echo "[security-dash] FATAL: volume empty and no restore after $${stalled}s" >&2
+              exit 1
+            fi
+            echo "[security-dash] WARN: no restore sentinel for $${stalled}s, starting" >&2
+            break
+          fi
+          [ $$(( waited % 60 )) -eq 0 ] && echo "[security-dash] waiting for restic-restore ($${waited}s)"
+          sleep 5
+          waited=$$(( waited + 5 ))
+        done
+        # Braced so a failed redirect is silenced too: this container runs as uid
+        # 10000 and the volume root is root-owned, so the append may not be
+        # permitted. The trace is diagnostics, never a reason to fail the boot.
+        { echo "$$(date -u +%FT%TZ) security-dash  proceeded after $${waited}s" >> /data/.boot-trace; } 2>/dev/null || true
+        exec docker-entrypoint.sh "$$@"
+      - "--"
     # No depends_on by design. podman-compose turns a
     # `service_completed_successfully` dependency into podman's --requires,
     # which demands the dependency be RUNNING -- and re-triggers that one-shot
@@ -136,6 +214,7 @@ services:
             # fail loudly instead and let restart: unless-stopped retry.
             if [ -z "$$(find /opt/data -mindepth 1 \
                           ! -name '.restore-*' ! -name .boot-trace \
+                          ! -name .bashrc ! -name .profile ! -name .bash_logout \
                           -print -quit 2>/dev/null)" ]; then
               echo "[hermes] FATAL: volume empty and no restore after $${stalled}s" >&2
               exit 1
@@ -363,6 +442,12 @@ services:
           finish "sibling restore finished after $${waited}s"
         fi
 
+        # An "empty" volume is never literally empty: the hermes image ships
+        # .bashrc/.profile/.bash_logout at /opt/data (its HOME), and podman seeds a
+        # fresh named volume from image content at mount time, before any process
+        # runs. Counting those as data makes a brand-new machine look populated and
+        # skips the one restore that matters. Anything else present still counts,
+        # so this stays fail-safe against overwriting a live volume.
         # Never overwrite a populated volume. restic restores with
         # --overwrite always, so running it against a machine that already holds
         # live state would revert that state to the last snapshot. The volume
@@ -385,6 +470,7 @@ services:
              [ -n "$$(find /opt/data -mindepth 1 \
                         ! -name .restore-complete ! -name .restore-inprogress \
                         ! -name .boot-trace \
+                        ! -name .bashrc ! -name .profile ! -name .bash_logout \
                         -print -quit 2>/dev/null)" ]; then
           mark_done
           finish "volume already holds data, not restoring"

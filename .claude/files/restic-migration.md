@@ -174,10 +174,13 @@ This is not a style preference; `depends_on` actively does not work here. See
 Only `wallet-gateway` keeps a `depends_on`, on the two long-running dashboards, where
 `--requires` is satisfied normally.
 
-**Known gap:** `hermes` and the dashboards have no waiter, so on a disaster-recovery boot
-they start against a volume still being restored. Harmless on a normal boot, where the
-restore is a sub-second no-op. The fix is to add the same sentinel wait to their existing
-`command:` wrapper.
+`hermes` and both dashboards now block on the same sentinel. `hermes` gets it as a prelude
+to its existing shell script; the dashboards get it as an `entrypoint:` wrapper that ends in
+`exec <original entrypoint> "$@"`, so the image CMD is passed through untouched rather than
+reconstructed. On timeout all three split on whether the volume holds data: populated means
+the restore is merely unconfirmed and starting is safe; empty means a real recovery has not
+happened, so they exit non-zero and let `restart: unless-stopped` retry rather than come up
+blank over the backup.
 
 ---
 
@@ -425,3 +428,24 @@ some containers, and `.boot-trace` — built for exactly this — lives on the v
 is only readable through a snapshot, which needs the service that had failed to start.
 `restic-restore` does have its stdout captured, so it should echo the previous boot's
 trace at startup. That one change would have made the first failed boot self-explaining.
+
+
+## The volume is never empty on a fresh machine
+
+The hermes image ships `.bashrc`, `.profile` and `.bash_logout` at `/opt/data` — it is the
+`hermes` user's HOME — and podman seeds a fresh named volume from image content at **mount
+time**, before any process in the container runs. No gate or ordering can prevent it.
+
+So `restic-restore`'s "is this volume empty" guard saw three files on a brand-new machine,
+concluded the volume already held data, skipped the restore and published the sentinel.
+Disaster recovery would have come up as an empty agent, and `restic-backup` would then have
+archived that empty volume until the real snapshots aged out of retention.
+
+Found by executing the guard against a fresh named volume rather than a hand-made one —
+`docker volume create` gives you a genuinely empty directory, which is not what production
+ever sees. The three names are now excluded from every emptiness test (the restore guard and
+all three service gates). Anything else present still counts as data, so the guard remains
+fail-safe against overwriting a live volume.
+
+Verified: dotfiles only -> restores; dotfiles plus one real file -> skips; a real
+subdirectory -> skips.

@@ -218,6 +218,14 @@ whole chain now completes in about 5 seconds:
 boot — ROFL captures stdout from only some containers, so ordering is recorded
 on the volume instead.
 
+A fresh volume is never literally empty, which the restore guard has to account
+for: the hermes image ships `.bashrc`, `.profile` and `.bash_logout` at
+`/opt/data` (its HOME), and podman seeds a new named volume from image content at
+mount time, before any process runs. Treating those as data would make a
+brand-new machine look populated and skip the restore — losing exactly the
+recovery this is for. They are excluded from the emptiness test; anything else
+present still counts, so the guard stays fail-safe against overwriting live data.
+
 This replaced an `rclone sync` mirror. The reason is that a mirror is not a
 backup: it has no restore points, so anything that corrupts or deletes data
 locally is faithfully copied to the remote on the next cycle, overwriting the
@@ -456,12 +464,12 @@ host until the machine exists. So bringup is two-phase:
 
 `hermes-dashboard` and `hermes` both mount the `hermes-data` volume, so the
 dashboard sees the same agent state the Telegram bot uses, and edits made there
-are backed up like everything else. Neither waits on the restore: in the ordinary
-case the volume survived the reboot and `restic-restore` exits in under a second,
-so there is nothing to wait for. On a disaster-recovery boot they would start
-against a volume still being restored — they share the live volume and pick state
-up as it lands, but giving them the same sentinel wait the backup services use is
-a known gap.
+are backed up like everything else. Both now block on the same restore sentinel as
+the backup services, wrapped around the image's own entrypoint so the image CMD
+still reaches it untouched. That matters most for the security dashboard: it
+rebuilds its live DB from `security/snapshot.db` at boot and writes that snapshot
+back every `HERMES_SNAPSHOT_INTERVAL`, so an ungated start on a recovering volume
+would overwrite the restored findings with an empty database.
 
 ### Security dashboard (`/security`)
 
