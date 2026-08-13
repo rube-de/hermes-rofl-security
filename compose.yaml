@@ -154,6 +154,20 @@ services:
       - |
         trace() { echo "$$(date -u +%FT%TZ) cache-prune    $$1" >> /data/.boot-trace 2>/dev/null || true; }
         trace start
+
+        # Same constraint as restic-restore: podman fails any dependent whose
+        # required container is not RUNNING, and hermes plus both dashboards
+        # require this one. Previously this waited minutes for the rclone
+        # restore sentinel, which kept it alive long enough by accident; the
+        # restic sentinel lands in under a second, so it has to hold open
+        # deliberately. Nothing waits on this exit.
+        finish() {
+          echo "[cache-prune] $$1"
+          trace "exit: $$1"
+          echo "[cache-prune] holding $${CACHE_PRUNE_LINGER:-300}s so dependents can start"
+          sleep "$${CACHE_PRUNE_LINGER:-300}"
+          exit 0
+        }
         wait_for_restore() {
           marker=/data/.restore-complete
           bootid=$$(cat /proc/sys/kernel/random/boot_id)
@@ -175,7 +189,7 @@ services:
         }
 
         if ! wait_for_restore; then
-          exit 0
+          finish "no restore sentinel, prune skipped"
         fi
 
         echo "[cache-prune] before:"; df -h /data
@@ -192,6 +206,7 @@ services:
           /data/repo/* \
           2>/dev/null
         echo "[cache-prune] after:"; df -h /data
+        finish "prune complete"
 
 
   # ─────────────────────── restic / Cloudflare R2 ───────────────────────
