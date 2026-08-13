@@ -517,6 +517,43 @@ services:
         trace "restore started"
         restic restore latest --host "$$RESTIC_HOST" --target / --overwrite always
 
+        # The backup deliberately holds the VACUUM INTO copies rather than the live
+        # SQLite files, so a restore alone leaves the agent with no databases at
+        # all -- measured on a real recovery drill: state.db absent while a 298 MB
+        # clean copy sat unused in db-snapshots/. Putting them back is the other
+        # half of that design and was missing.
+        #
+        # This runs before the sentinel is published, so nothing starts until the
+        # databases are in place. An existing live file is never overwritten.
+        reinstate_dbs() {
+          snapdir=/opt/data/db-snapshots
+          [ -d "$$snapdir" ] || return 0
+          put=0; kept=0
+          if [ -f "$$snapdir/.manifest" ]; then
+            while IFS="$$(printf '\t')" read -r fname rel; do
+              [ -n "$$rel" ] && [ -f "$$snapdir/$$fname" ] || continue
+              dest=/opt/data/$$rel
+              if [ -e "$$dest" ]; then kept=$$(( kept + 1 )); continue; fi
+              mkdir -p "$$(dirname "$$dest")"
+              cp "$$snapdir/$$fname" "$$dest" && put=$$(( put + 1 ))
+            done < "$$snapdir/.manifest"
+          else
+            # Snapshots taken before the manifest existed: fall back to decoding
+            # the name. Correct for every current path, and only ever creates
+            # files that are missing, so a bad guess cannot destroy anything.
+            for f in "$$snapdir"/*.db; do
+              [ -f "$$f" ] || continue
+              rel=$$(basename "$$f" | sed 's|__|/|g')
+              dest=/opt/data/$$rel
+              if [ -e "$$dest" ]; then kept=$$(( kept + 1 )); continue; fi
+              mkdir -p "$$(dirname "$$dest")"
+              cp "$$f" "$$dest" && put=$$(( put + 1 ))
+            done
+          fi
+          echo "[restic-restore] databases reinstated: $$put restored, $$kept already present"
+        }
+        reinstate_dbs
+
         count=$$(find /opt/data -type f | wc -l)
         size=$$(du -sh /opt/data | awk '{print $$1}')
         echo "[restic-restore] complete: $$count files, $$size"
@@ -598,7 +635,8 @@ services:
             skip = {out, root / "security" / "live"}
             out.mkdir(parents=True, exist_ok=True)
             found = failed = 0
-            expected = set()
+            expected = {".manifest"}
+            mapping = []
             for db in sorted(root.rglob("*.db")):
                 if set(db.parents) & skip:
                     continue
@@ -608,7 +646,9 @@ services:
                 if rel == "/security/snapshot.db":
                     continue
                 found += 1
-                dest = out / db.relative_to(root).as_posix().replace("/", "__")
+                rel_path = db.relative_to(root).as_posix()
+                dest = out / rel_path.replace("/", "__")
+                mapping.append((dest.name, rel_path))
                 tmp = dest.with_name(dest.name + ".tmp")
                 expected.add(dest.name)
                 try:
@@ -628,6 +668,13 @@ services:
                     failed += 1
                     tmp.unlink(missing_ok=True)
                     print(f"[db-snapshot] WARN: {db}: {exc}", file=sys.stderr)
+            # The restore reinstates these copies to their live paths, and it must
+            # not have to reverse the "/" -> "__" encoding to work out where each
+            # one belongs: a profile named foo__bar would decode to foo/bar. Record
+            # the mapping instead of inferring it.
+            (out / ".manifest").write_text(
+                "".join(f"{name}\t{rel}\n" for name, rel in sorted(mapping)))
+
             # Drop snapshots whose source database is gone. Without this a
             # renamed or deleted database leaves its copy here forever, and this
             # directory is on the same disk as everything else.
