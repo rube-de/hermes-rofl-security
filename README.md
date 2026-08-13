@@ -382,9 +382,23 @@ to Cloudflare.
   `(host, paths)`, and every container gets a random hostname. Without the pin,
   each run forms its own retention group and `restic forget` deletes **nothing**
   while still exiting 0 — measured: `--keep-last 2` left all 6 snapshots.
-- **Backup staleness is not alerted on.** Nothing pages you if snapshots stop
-  arriving; check `just restic-snapshots` periodically. A fail-closed restore
-  bug once turned into a silent 17-hour gap this way.
+- **Backup staleness is alerted on, from two places, and it needs both.**
+  `backup-watchdog` runs in the enclave and messages Telegram when the newest
+  successful backup is older than `BACKUP_STALE_AFTER` (default 3h). It is
+  gated on *nothing*: the 17-hour silent gap happened because `restic-backup`
+  was stuck in `wait_for_restore` before its backup loop ever ran, and
+  `cache-prune` and `db-snapshot` block on that same sentinel — a watchdog
+  sharing the dependency it watches would have been just as stuck.
+
+  That covers "machine up, backups not happening". It cannot cover "machine
+  gone", because it dies with the machine. For that, run `just backup-check`
+  somewhere else — it exits 1 when the newest snapshot is older than
+  `MAX_AGE_HOURS` (default 3) and 2 when the repository is unreachable, so it
+  drops straight into cron or launchd:
+
+  ```sh
+  */30 * * * * cd /path/to/repo && just backup-check || notify-me
+  ```
 - **Encryption key rotation** is out of scope. restic supports adding a second
   key to a repository (`restic key add`), which is the starting point if you
   need it — but the existing snapshots stay encrypted to the master key either

@@ -73,6 +73,12 @@ restic-init:
 test-r2 *args:
     @./scripts/test-r2.sh {{args}}
 
+# Fail if the newest R2 snapshot is older than MAX_AGE_HOURS (default 3).
+# Exit: 0 fresh, 1 stale, 2 repository unreachable. Run this OFF the machine —
+# the in-enclave watchdog cannot notice that the machine itself is gone.
+backup-check:
+    @./scripts/backup-check.sh
+
 # List restore points in the R2 repository.
 restic-snapshots:
     @./scripts/restic-run.sh snapshots --host rofl

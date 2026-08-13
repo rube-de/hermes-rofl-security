@@ -885,6 +885,7 @@ services:
         # Boot coordination state: local to one machine, never restored.
         /opt/data/.restore-complete
         /opt/data/.restore-inprogress
+        /opt/data/.last-backup-ok
         # Generic build and virtualenv noise, at any depth.
         **/node_modules
         **/__pycache__
@@ -915,6 +916,10 @@ services:
                --exclude-caches \
                --tag rofl $${UNVERIFIED:+--tag restore-unverified}; then
             elapsed=$$(( $$(date +%s) - start ))
+            # Heartbeat for backup-watchdog. Local coordination state, never
+            # restored -- a timestamp from the machine we are recovering FROM
+            # would read as a fresh backup on the machine we recover TO.
+            date +%s > /opt/data/.last-backup-ok
             echo "[backup] cycle complete in $${elapsed}s"
           else
             rc=$$?
@@ -967,6 +972,96 @@ services:
       - AWS_DEFAULT_REGION=auto
       - BACKUP_INTERVAL=${BACKUP_INTERVAL:-3600}
       - PRUNE_EVERY_CYCLES=${PRUNE_EVERY_CYCLES:-24}
+    volumes:
+      - hermes-data:/opt/data
+
+  # Alerts when backups stop arriving. Deliberately gated on NOTHING.
+  #
+  # This exists because of a 17-hour silent gap: restic-backup was stuck in
+  # wait_for_restore, before its backup loop, waiting on a sentinel that never
+  # came. Any check inside that loop would never have run -- and cache-prune and
+  # db-snapshot block on the same sentinel, so none of them could have noticed
+  # either. A watchdog that shares the dependency it is watching is not a
+  # watchdog, so this one waits for nothing and starts immediately.
+  #
+  # It catches "the machine is up but backups are not happening". It cannot
+  # catch "the machine is gone" -- nothing running on the machine can. That
+  # needs an external check; see README.
+  backup-watchdog:
+    image: "docker.io/curlimages/curl:8.11.1@sha256:c1fe1679c34d9784c1b0d1e5f62ac0a79fca01fb6377cdd33e90473c6f9f9a69"
+    platform: linux/amd64
+    restart: unless-stopped
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        set -u
+        INTERVAL=$${WATCHDOG_INTERVAL:-900}
+        STALE=$${BACKUP_STALE_AFTER:-10800}
+        REALERT=$${ALERT_REPEAT_AFTER:-21600}
+
+        # Telegram wants a chat id; TELEGRAM_ALLOWED_USERS is a comma-separated
+        # list of user ids, and a user id is a valid chat id once that user has
+        # talked to the bot -- which they have, it is their own agent.
+        CHAT=$${ALERT_CHAT_ID:-}
+        [ -n "$$CHAT" ] || CHAT=$$(printf '%s' "$${TELEGRAM_ALLOWED_USERS:-}" | cut -d, -f1)
+
+        alert() {
+          echo "[watchdog] ALERT: $$1" >&2
+          if [ -z "$${TELEGRAM_BOT_TOKEN:-}" ] || [ -z "$$CHAT" ]; then
+            echo "[watchdog] no telegram token/chat configured, logged only" >&2
+            return 0
+          fi
+          code=$$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 \
+            "https://api.telegram.org/bot$${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=$$CHAT" \
+            --data-urlencode "text=$$1" 2>/dev/null) || code=000
+          if [ "$$code" = "200" ]; then
+            echo "[watchdog] alert delivered"
+          else
+            echo "[watchdog] WARN: telegram returned $$code" >&2
+          fi
+        }
+
+        last_alert=0
+        echo "[watchdog] started: interval=$${INTERVAL}s stale_after=$${STALE}s"
+
+        while :; do
+          # Grace is measured from kernel uptime, not the clock: a TDX VM syncs
+          # its clock AFTER boot, and an early wall-clock read once produced a
+          # bogus epoch that broke the restore sentinel for 17 hours. Uptime
+          # cannot jump.
+          up=$$(cut -d. -f1 /proc/uptime)
+          if [ "$$up" -lt "$$STALE" ]; then
+            sleep "$$INTERVAL"; continue
+          fi
+
+          now=$$(date +%s)
+          last=$$(cat /opt/data/.last-backup-ok 2>/dev/null || echo 0)
+          case "$$last" in ''|*[!0-9]*) last=0 ;; esac
+
+          if [ "$$last" -eq 0 ]; then
+            age="never"; stale=1
+          else
+            age=$$(( (now - last) / 60 ))
+            if [ "$$(( now - last ))" -gt "$$STALE" ]; then stale=1; else stale=0; fi
+            age="$${age}m ago"
+          fi
+
+          if [ "$$stale" -eq 1 ] && [ "$$(( now - last_alert ))" -ge "$$REALERT" ]; then
+            alert "Hermes ROFL: backups are stale. Last successful backup: $$age (threshold $$(( STALE / 60 ))m). Check: just restic-snapshots"
+            last_alert=$$now
+          fi
+
+          sleep "$$INTERVAL"
+        done
+    environment:
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - TELEGRAM_ALLOWED_USERS=${TELEGRAM_ALLOWED_USERS}
+      - ALERT_CHAT_ID=${ALERT_CHAT_ID:-}
+      - WATCHDOG_INTERVAL=${WATCHDOG_INTERVAL:-900}
+      - BACKUP_STALE_AFTER=${BACKUP_STALE_AFTER:-10800}
+      - ALERT_REPEAT_AFTER=${ALERT_REPEAT_AFTER:-21600}
     volumes:
       - hermes-data:/opt/data
 
