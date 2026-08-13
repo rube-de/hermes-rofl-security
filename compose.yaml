@@ -10,6 +10,21 @@ services:
       - |
         set -eu
         trace() { echo "$$(date -u +%FT%TZ) rclone-restore $$1" >> /sync/.boot-trace 2>/dev/null || true; }
+        # podman-compose re-executes a service_completed_successfully dependency
+        # once per dependent: measured 8 rclone-restore runs in a single boot,
+        # ~100s apart, which is most of the ~14 minute boot time. Restoring more
+        # than once per boot is at best wasted work and at worst destructive --
+        # restic-restore uses --overwrite always, so a second pass while the
+        # agent is live would revert its work to the snapshot.
+        #
+        # The sentinel holds this boot's kernel boot_id and is written only on
+        # success, so a failed restore leaves no matching marker and the next
+        # invocation still retries. Only a completed restore is skipped.
+        if [ "$$(cat /sync/.restore-complete 2>/dev/null)" = "$$(cat /proc/sys/kernel/random/boot_id)" ]; then
+          echo "[restore] already restored this boot, nothing to do"
+          exit 0
+        fi
+
         trace start
         echo "[restore] starting at $$(date -u +%FT%TZ)"
         echo "[diag] df:"; df -h /sync
@@ -22,7 +37,7 @@ services:
         # volume is known-good, so a restore FATAL leaves it absent and every
         # waiter stays parked rather than acting on half-restored data.
         mark_done() {
-          date -u +%FT%TZ > /sync/.restore-complete
+          cat /proc/sys/kernel/random/boot_id > /sync/.restore-complete
           trace sentinel-written
           echo "[restore] sentinel written: /sync/.restore-complete"
         }
@@ -286,91 +301,6 @@ services:
     volumes:
       - hermes-data:/opt/data
 
-  # TEMPORARY DIAGNOSTIC -- remove once the disk question is answered.
-  #
-  # df reports 11.3G used of 15.2G while the data volume is only 4.3G, so about
-  # 5G is unaccounted for. The volume and podman's image store share a
-  # filesystem, so the breakdown has to come from podman itself.
-  #
-  # ROFL rejects arbitrary bind mounts -- only /run/rofl-appd.sock,
-  # /run/podman.sock and paths under /storage/ are permitted -- so this asks the
-  # podman API rather than crawling the host, which is both allowed and more
-  # direct: it is exactly what `podman system df` reports.
-  #
-  # Writes to the data volume because ROFL captures logs from only some
-  # containers. Read it back with:
-  #   just restic dump latest /opt/data/.disk-report
-  disk-report:
-    image: "docker.io/library/python:3.12-alpine@sha256:6d43704baacd1bfbe7c295d7f13079d5d8104ed33568873133f8fc69980419df"
-    platform: linux/amd64
-    restart: "no"
-    volumes:
-      - hermes-data:/opt/data
-      - /run/podman.sock:/run/podman.sock
-    entrypoint: /usr/local/bin/python
-    command:
-      - -u
-      - -c
-      - |
-        import json, socket, sys, time
-
-        def api(path):
-            """HTTP/1.0 over the unix socket -- avoids chunked-encoding parsing."""
-            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            s.settimeout(60)
-            s.connect("/run/podman.sock")
-            s.sendall(f"GET {path} HTTP/1.0\r\nHost: d\r\n\r\n".encode())
-            buf = b""
-            while True:
-                chunk = s.recv(65536)
-                if not chunk:
-                    break
-                buf += chunk
-            s.close()
-            head, _, body = buf.partition(b"\r\n\r\n")
-            if b" 200 " not in head.split(b"\r\n")[0]:
-                raise RuntimeError(head.split(b"\r\n")[0].decode())
-            return json.loads(body)
-
-        def gib(n):
-            return f"{(n or 0) / 1073741824:.2f} GiB"
-
-        lines = [f"=== podman disk usage, generated {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} ==="]
-        for base in ("/v4.0.0/libpod", "/v1.41"):
-            try:
-                df = api(base + "/system/df")
-            except Exception as exc:
-                lines.append(f"  {base}/system/df failed: {exc}")
-                continue
-            lines.append(f"--- {base}/system/df ---")
-            for key in ("Images", "Containers", "Volumes"):
-                items = df.get(key) or []
-                total = sum((i.get("Size") or i.get("UsableSize") or 0) for i in items)
-                reclaim = sum((i.get("Size") or 0) for i in items
-                              if not (i.get("Containers") or i.get("InUse") or i.get("Links")))
-                lines.append(f"  {key:<11} count={len(items):<4} total={gib(total)}  reclaimable={gib(reclaim)}")
-            lines.append("--- images, largest first ---")
-            for i in sorted(df.get("Images") or [], key=lambda x: -(x.get("Size") or 0))[:20]:
-                tag = (i.get("Repository") or i.get("RepoTags") or ["<none>"])
-                if isinstance(tag, list):
-                    tag = tag[0] if tag else "<none>"
-                lines.append(f"  {gib(i.get('Size')):>10}  containers={i.get('Containers', 0)}  {tag}")
-            break
-
-        try:
-            imgs = api("/v4.0.0/libpod/images/json")
-            dangling = [i for i in imgs if not i.get("RepoTags") or i.get("RepoTags") == ["<none>:<none>"]]
-            lines.append(f"--- images total={len(imgs)} dangling={len(dangling)} ---")
-            lines.append(f"  dangling bytes: {gib(sum(i.get('Size') or 0 for i in dangling))}")
-        except Exception as exc:
-            lines.append(f"  images/json failed: {exc}")
-
-        lines.append("=== end ===")
-        report = "\n".join(lines) + "\n"
-        with open("/opt/data/.disk-report", "w") as fh:
-            fh.write(report)
-        print(report)
-
   # Runs every boot, before hermes/hermes-dashboard start pulling their large
   # images. Removes package-manager caches (pnpm/uv/npm/go module cache) and
   # re-clonable git checkouts under hermes-data — these regrow as the agent
@@ -398,11 +328,10 @@ services:
         trace start
         wait_for_restore() {
           marker=/data/.restore-complete
-          boot=$$(( $$(date +%s) - $$(cut -d. -f1 /proc/uptime) ))
+          bootid=$$(cat /proc/sys/kernel/random/boot_id)
           waited=0
           while :; do
-            mt=$$(stat -c %Y "$$marker" 2>/dev/null || echo 0)
-            if [ "$$mt" -ge "$$boot" ] 2>/dev/null; then
+            if [ "$$(cat "$$marker" 2>/dev/null)" = "$$bootid" ]; then
               trace "proceeded after $${waited}s"
               echo "[cache-prune] restore sentinel is fresh, proceeding"
               return 0
@@ -466,6 +395,21 @@ services:
       - -c
       - |
         set -eu
+        # podman-compose re-executes a service_completed_successfully dependency
+        # once per dependent: measured 8 rclone-restore runs in a single boot,
+        # ~100s apart, which is most of the ~14 minute boot time. Restoring more
+        # than once per boot is at best wasted work and at worst destructive --
+        # restic-restore uses --overwrite always, so a second pass while the
+        # agent is live would revert its work to the snapshot.
+        #
+        # The sentinel holds this boot's kernel boot_id and is written only on
+        # success, so a failed restore leaves no matching marker and the next
+        # invocation still retries. Only a completed restore is skipped.
+        if [ "$$(cat /opt/data/.restore-complete 2>/dev/null)" = "$$(cat /proc/sys/kernel/random/boot_id)" ]; then
+          echo "[restic-restore] already restored this boot, nothing to do"
+          exit 0
+        fi
+
         echo "[restic-restore] starting at $$(date -u +%FT%TZ)"
 
         # Fail CLOSED. `restic snapshots` exits non-zero for an absent repo,
@@ -485,7 +429,7 @@ services:
         # is known-good, so a failure parks every waiter instead of letting them
         # act on half-restored data. At cutover this becomes the only writer.
         mark_done() {
-          date -u +%FT%TZ > /opt/data/.restore-complete
+          cat /proc/sys/kernel/random/boot_id > /opt/data/.restore-complete
           echo "[restic-restore] sentinel written: /opt/data/.restore-complete"
         }
 
@@ -633,21 +577,21 @@ services:
                 pass
 
         def wait_for_restore():
-            # Same rule as the shell services: the sentinel counts only if it was
-            # written since the current kernel boot, so a marker left on the
-            # persistent volume by a previous boot cannot wave us through onto a
-            # volume that is still being restored.
+            # Same rule as the shell services: match the kernel boot_id, so a
+            # marker left by a previous boot cannot wave us through onto a volume
+            # that is still being restored. No clock involved -- see the shell
+            # waiters for why that matters on a TDX VM.
             marker = root / ".restore-complete"
-            with open("/proc/uptime") as fh:
-                boot = time.time() - float(fh.read().split()[0])
+            with open("/proc/sys/kernel/random/boot_id") as fh:
+                bootid = fh.read().strip()
             waited = 0
             while not stopping:
                 try:
-                    if marker.stat().st_mtime >= boot:
+                    if marker.read_text().strip() == bootid:
                         trace(f"proceeded after {waited}s")
                         print("[db-snapshot] restore sentinel is fresh, proceeding")
                         return True
-                except FileNotFoundError:
+                except OSError:
                     pass
                 if waited % 60 == 0:
                     print(f"[db-snapshot] waiting for rclone-restore to finish ({waited}s)")
@@ -694,11 +638,10 @@ services:
         trace start
         wait_for_restore() {
           marker=/opt/data/.restore-complete
-          boot=$$(( $$(date +%s) - $$(cut -d. -f1 /proc/uptime) ))
+          bootid=$$(cat /proc/sys/kernel/random/boot_id)
           waited=0
           while :; do
-            mt=$$(stat -c %Y "$$marker" 2>/dev/null || echo 0)
-            if [ "$$mt" -ge "$$boot" ] 2>/dev/null; then
+            if [ "$$(cat "$$marker" 2>/dev/null)" = "$$bootid" ]; then
               trace "proceeded after $${waited}s"
               echo "[backup] restore sentinel is fresh, proceeding"
               return 0
