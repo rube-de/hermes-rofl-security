@@ -177,7 +177,8 @@ the disk goes with it. To survive that, Hermes's `/opt/data` is backed up to a
   Restores the newest snapshot, but **only onto an empty volume**. A machine
   that already holds data is left alone, because restic restores with
   `--overwrite always` and a second pass would revert live agent state to the
-  last snapshot. Everything else waits on the sentinel it publishes.
+  last snapshot. On a normal boot it therefore does nothing and exits in under a
+  second. Everything else waits on the sentinel it publishes.
 - `db-snapshot` — every `DB_SNAPSHOT_INTERVAL` seconds (default 1800), writes a
   clean copy of each live SQLite database to `db-snapshots/` with `VACUUM INTO`.
   The live files themselves are excluded from the backup: copying a hot SQLite
@@ -185,6 +186,37 @@ the disk goes with it. To survive that, Hermes's `/opt/data` is backed up to a
 - `restic-backup` — every `BACKUP_INTERVAL` seconds (default 3600), snapshots
   the volume. Every 24th cycle it applies retention (`--keep-hourly 24
   --keep-daily 7 --keep-weekly 4 --keep-monthly 6`) and prunes.
+
+### Why ordering is a sentinel and not `depends_on`
+
+`podman-compose` maps `condition: service_completed_successfully` onto podman's
+`--requires`, which does two things the compose syntax does not suggest: it
+demands the dependency be **running**, and it **re-triggers** that one-shot once
+per dependent. Every dependent therefore paid a full re-run of the restore —
+~300s each on the old rclone path, which is rclone's idle timeout, and 1800s
+once the restore started failing. That, and not object counts, is what made
+boots take 40 minutes.
+
+A fast one-shot makes it worse, not better: the re-triggered container has
+already exited by the time podman checks, so the dependent fails outright with
+`container state improper`. Cutting over to restic — where the restore returns
+in under a second — turned the slowness into a total boot failure.
+
+So no service depends on a one-shot. `cache-prune`, `db-snapshot` and
+`restic-backup` each block on `/opt/data/.restore-complete` containing the
+current kernel `boot_id`, which `restic-restore` writes only on success. The
+whole chain now completes in about 5 seconds:
+
+```
+12:32:20  restic-restore  volume already holds data, not restoring
+12:32:21  restic-backup   proceeded after 0s
+12:32:21  db-snapshot     proceeded after 0s
+12:32:25  cache-prune     proceeded after 5s -> prune complete
+```
+
+`just restic dump latest /opt/data/.boot-trace` prints exactly this for the last
+boot — ROFL captures stdout from only some containers, so ordering is recorded
+on the volume instead.
 
 This replaced an `rclone sync` mirror. The reason is that a mirror is not a
 backup: it has no restore points, so anything that corrupts or deletes data
@@ -424,10 +456,12 @@ host until the machine exists. So bringup is two-phase:
 
 `hermes-dashboard` and `hermes` both mount the `hermes-data` volume, so the
 dashboard sees the same agent state the Telegram bot uses, and edits made there
-are backed up like everything else. Both wait on `restic-restore` (via
-`cache-prune`), so neither starts against a half-restored `/opt/data` — and in
-the ordinary case, where the volume survived the reboot, the restore is a
-sub-second no-op.
+are backed up like everything else. Neither waits on the restore: in the ordinary
+case the volume survived the reboot and `restic-restore` exits in under a second,
+so there is nothing to wait for. On a disaster-recovery boot they would start
+against a volume still being restored — they share the live volume and pick state
+up as it lands, but giving them the same sentinel wait the backup services use is
+a known gap.
 
 ### Security dashboard (`/security`)
 

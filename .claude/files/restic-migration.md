@@ -159,18 +159,25 @@ lock does *not* block the next `restic backup` (non-exclusive) but *does* block
 restic proves staleness from hostname+PID and the hostname differs every run.
 `--remove-all` skips that proof — safe here because the repository has exactly one writer.
 
-### `depends_on`
+### `depends_on` — removed entirely
 
-`restic-restore` → `cache-prune` → everything else. Backing up a half-restored volume
-produces a valid-looking snapshot of incomplete data, and after 24 cycles retention could
-age out the good snapshots and leave only those.
+There is no `depends_on` on any one-shot. Ordering is the boot-id sentinel:
+`cache-prune`, `db-snapshot` and `restic-backup` each block until
+`/opt/data/.restore-complete` holds the current kernel `boot_id`, which
+`restic-restore` writes only on success. Their timeout measures time with **no restore
+running** rather than wall-clock, so a slow first-ever restore is never timed out from
+under them — a fixed bound would otherwise snapshot the partial tree it was still writing.
 
-`depends_on` alone does not enforce this: podman-compose starts dependents **regardless**
-of a `service_completed_successfully` condition. So `cache-prune`, `db-snapshot` and
-`restic-backup` each additionally block on the sentinel file. Their timeout measures time
-with **no restore running** rather than wall-clock, so a slow first-ever restore is never
-timed out from under them — a fixed 20-minute bound would otherwise snapshot the partial
-tree it was still writing.
+This is not a style preference; `depends_on` actively does not work here. See
+"The outage" below.
+
+Only `wallet-gateway` keeps a `depends_on`, on the two long-running dashboards, where
+`--requires` is satisfied normally.
+
+**Known gap:** `hermes` and the dashboards have no waiter, so on a disaster-recovery boot
+they start against a volume still being restored. Harmless on a normal boot, where the
+restore is a sub-second no-op. The fix is to add the same sentinel wait to their existing
+`command:` wrapper.
 
 ---
 
@@ -365,3 +372,56 @@ preflight-failure path, on the assumption `.env` had no R2 values yet. It did. T
 is the intended one-time setup step, is idempotent, and created an empty repository — no
 data was touched — but it was a live mutation I did not intend to make and did not ask
 about first.
+
+
+---
+
+## The outage — what `service_completed_successfully` actually does
+
+Cutting over took production down for ~95 minutes (2026-08-13, 12:59–14:32 CEST). The
+cause is a podman-compose behaviour that the compose syntax actively misleads about.
+
+`podman-compose` 1.5.0 parses `depends_on.condition` into a `ServiceDependencyCondition`
+and then emits only `--requires=<names>`. podman's `--requires` does two things:
+
+1. it demands the required container be **RUNNING**, not completed; and
+2. it **re-triggers** that container once per dependent.
+
+So `condition: service_completed_successfully` does not wait for completion. Each
+dependent instead re-runs the one-shot and then requires it to be alive.
+
+**What that cost before restic.** Every dependent paid a full re-run of
+`rclone-restore`. Each run stalled into rclone's 5-minute idle timeout, and there were
+eight dependents — the 40-minute boot, and the eight restore runs per boot. Neither was
+ever about object counts or the network.
+
+**Why restic turned it into an outage.** On a populated volume `restic-restore` returns
+in under a second, so the re-triggered container had already exited when podman checked
+it, and every dependent failed with `container state improper`. Nothing started: no
+gateway, no agent, no backup.
+
+**Why the rollback did not save us.** Reverting to the rclone compose did not recover.
+The boot trace shows why:
+
+    12:15:17Z rclone-restore copy exited rc=1
+
+The rclone restore was failing outright, so it published no sentinel, so `cache-prune`
+burned its full 1800s cap per dependent — measured: `cache-prune` started 11:40:17, the
+next service started 12:10:20, exactly 1800s later. Four services remained, i.e. another
+~2 hours. Rolling forward was the only path back.
+
+**The fix.** Remove every `depends_on` that points at a one-shot and let the sentinel
+order the boot. Chain time went from 40 minutes to 5 seconds.
+
+### What this cost, and what would have caught it
+
+Two intermediate attempts (a `RESTORE_LINGER` hold, then the same for `cache-prune`) were
+built on a partly-correct model and each cost a deploy cycle. The linger was not wrong —
+it did clear the `improper state` failure — it just reproduced rclone's accidental 300s
+timeout and so reproduced the slow boot.
+
+What actually made this hard to diagnose was blindness: ROFL captures stdout from only
+some containers, and `.boot-trace` — built for exactly this — lives on the volume, which
+is only readable through a snapshot, which needs the service that had failed to start.
+`restic-restore` does have its stdout captured, so it should echo the previous boot's
+trace at startup. That one change would have made the first failed boot self-explaining.
