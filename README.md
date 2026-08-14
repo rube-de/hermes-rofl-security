@@ -103,6 +103,13 @@ this design preserves.
   auxiliary `auto` chain for vision/web_extract/session_search side-tasks.
   Leave empty in `.env` if you don't have one; `has_usable_secret()` filters
   short/empty values, so the auto chain just falls through.
+- (Optional, with `compose.yaml`) `KIMI_API_KEY` — a Kimi Coding Plan key
+  (<https://www.kimi.com/coding>), same auxiliary role as `OPENROUTER_API_KEY`.
+  `compose.yaml` pins `KIMI_BASE_URL=https://api.kimi.com/coding`, because
+  Hermes only auto-routes there for keys prefixed `sk-kimi-`. To make Kimi the
+  default model instead, set `provider: kimi-coding` / `default: k3` /
+  `api_mode: anthropic_messages` in `/opt/data/config.yaml` (see "Model
+  selection" — compose's heredoc is first-boot only).
 - (Default `compose.yaml` only) for the wallet-gated dashboard — see "Dashboard
   access" for the full flow:
   - The gateway image `ghcr.io/rube-de/hermes-wallet-gateway` (published, or

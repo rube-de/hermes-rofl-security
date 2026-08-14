@@ -28,9 +28,9 @@ services:
       - WALLET_DOMAIN=${WALLET_DOMAIN}
 
   hermes-dashboard:
-    # Pinned to v0.20.0 — bump deliberately, don't float on :latest (mutable
+    # Pinned by tag+digest — bump deliberately, don't float on :latest (mutable
     # tags + pull_policy: always filled the machine's disk on every restart).
-    image: docker.io/nousresearch/hermes-agent:v2026.8.3@sha256:16788311e2fa3035456bdc1bafb8ec2b1777db64ebf020af9bb7eb73c3712c9e
+    image: docker.io/nousresearch/hermes-agent:v2026.8.13@sha256:68e15ae2a6d894d0ccbd9f8aacbbe13d4d28fa5dc9b6a303970b67bb2499b1a6
     platform: linux/amd64
     restart: unless-stopped
     # Gated on the restore like its siblings. Failing closed is correct here:
@@ -180,8 +180,8 @@ services:
       - hermes-data:/data
 
   hermes:
-    # Pinned to v0.20.0 — see hermes-dashboard for why we stopped floating on :latest.
-    image: docker.io/nousresearch/hermes-agent:v2026.8.3@sha256:16788311e2fa3035456bdc1bafb8ec2b1777db64ebf020af9bb7eb73c3712c9e
+    # Pinned by tag+digest — see hermes-dashboard for why we stopped floating on :latest.
+    image: docker.io/nousresearch/hermes-agent:v2026.8.13@sha256:68e15ae2a6d894d0ccbd9f8aacbbe13d4d28fa5dc9b6a303970b67bb2499b1a6
     platform: linux/amd64
     restart: unless-stopped
     # No depends_on by design. podman-compose turns a
@@ -251,6 +251,10 @@ services:
       - GLM_BASE_URL=https://api.z.ai/api/coding/paas/v4
       - GLM_API_KEY=${GLM_API_KEY}
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      # Base URL set explicitly: Hermes only auto-routes to the coding endpoint
+      # for keys prefixed `sk-kimi-`, otherwise it uses the legacy moonshot host.
+      - KIMI_BASE_URL=https://api.kimi.com/coding
+      - KIMI_API_KEY=${KIMI_API_KEY}
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
       - TELEGRAM_ALLOWED_USERS=${TELEGRAM_ALLOWED_USERS}
       - TELEGRAM_GROUP_ALLOWED_CHATS=${TELEGRAM_GROUP_ALLOWED_CHATS}
