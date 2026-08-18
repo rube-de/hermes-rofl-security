@@ -989,6 +989,11 @@ services:
     image: "docker.io/curlimages/curl:8.11.1@sha256:c1fe1679c34d9784c1b0d1e5f62ac0a79fca01fb6377cdd33e90473c6f9f9a69"
     platform: linux/amd64
     restart: unless-stopped
+    # /opt/data is hermes' HOME and is mode 700 owned by uid 10000. This image
+    # defaults to uid 100 (curl_user), which cannot even traverse it -- the
+    # heartbeat read failed with EACCES and every check reported "never".
+    # Run as the owner rather than as root: reading one file needs no more.
+    user: "10000:10000"
     entrypoint: /bin/sh
     command:
       - -c
@@ -1035,19 +1040,39 @@ services:
           fi
 
           now=$$(date +%s)
-          last=$$(cat /opt/data/.last-backup-ok 2>/dev/null || echo 0)
-          case "$$last" in ''|*[!0-9]*) last=0 ;; esac
+          HEARTBEAT=/opt/data/.last-backup-ok
 
-          if [ "$$last" -eq 0 ]; then
-            age="never"; stale=1
+          # "cannot read it" and "it never happened" are different problems and
+          # must not produce the same message. Conflating them turned a
+          # permissions mistake in this very service into an hourly alert saying
+          # backups had never run, while they were in fact running every hour.
+          if [ ! -x /opt/data ]; then
+            # Cannot even traverse the directory, so -e below would report the
+            # heartbeat as absent when it may be perfectly fine. Test this first
+            # or a permissions fault masquerades as "backups never ran".
+            msg="watchdog cannot read /opt/data (permissions) -- backups may well be fine, this is a fault in the watchdog itself"
+            stale=1
+          elif [ ! -e "$$HEARTBEAT" ]; then
+            msg="no successful backup has been recorded yet"
+            stale=1
+          elif ! last=$$(cat "$$HEARTBEAT" 2>/dev/null); then
+            msg="watchdog cannot READ $$HEARTBEAT (permissions?) -- backups may well be fine, this is a fault in the watchdog itself"
+            stale=1
           else
-            age=$$(( (now - last) / 60 ))
-            if [ "$$(( now - last ))" -gt "$$STALE" ]; then stale=1; else stale=0; fi
-            age="$${age}m ago"
+            case "$$last" in ''|*[!0-9]*) last=0 ;; esac
+            if [ "$$last" -eq 0 ]; then
+              msg="heartbeat file is empty or malformed"
+              stale=1
+            elif [ "$$(( now - last ))" -gt "$$STALE" ]; then
+              msg="last successful backup was $$(( (now - last) / 60 ))m ago"
+              stale=1
+            else
+              stale=0
+            fi
           fi
 
           if [ "$$stale" -eq 1 ] && [ "$$(( now - last_alert ))" -ge "$$REALERT" ]; then
-            alert "Hermes ROFL: backups are stale. Last successful backup: $$age (threshold $$(( STALE / 60 ))m). Check: just restic-snapshots"
+            alert "Hermes ROFL backup alert: $$msg (threshold $$(( STALE / 60 ))m). Check: just restic-snapshots"
             last_alert=$$now
           fi
 
