@@ -157,18 +157,15 @@ running the bundle you built.
   (9119); both, plus Hermes' OpenAI-compatible Gateway API (8642), stay
   unpublished, so the gateway is the sole perimeter. `compose-openrouter.yaml`
   publishes nothing — Telegram is outbound long-polling.
-- **Pin images by digest for production.** The backup services are already
-  pinned (`restic:0.17.3@sha256:…`), but the app images in `compose.yaml` —
-  `hermes`, `hermes-dashboard`, `hermes-security-dashboard`, and the
-  `wallet-gateway` — track floating `:latest` tags for convenience. That's fine
-  while iterating, but **in
-  production pin each to a digest instead of a bare `:latest`**: the enclave
-  identity is derived from the exact bundle, so a floating tag means the attested
-  image can change under you and the build isn't reproducible. Resolve a digest
-  with `docker buildx imagetools inspect docker.io/nousresearch/hermes-agent:latest`
-  and replace `:latest` with `@sha256:…` (see `compose-openrouter.yaml`, which
-  pins Hermes this way). Then rebuild, update, redeploy — which rotates the
-  enclave ID.
+- **Pin images by digest for production.** In both compose files, `hermes` and
+  `hermes-dashboard` use Hermes Agent **v0.21.5 (`v2026.9.24`)**, pinned by digest.
+  The backup services, wallet gateway and security dashboard are also
+  digest-pinned: the enclave identity is derived from the exact bundle, so a
+  floating tag means the attested image can change and builds aren't reproducible.
+  For a Hermes upgrade, resolve the chosen release with
+  `docker buildx imagetools inspect docker.io/nousresearch/hermes-agent:<release-tag>`
+  and update both services in both compose files to the same tag and digest.
+  Then rebuild, update, redeploy — which rotates the enclave ID.
 - **Switching compose files rotates the enclave ID.** Any client that pinned
   the previous attestation will need to re-trust the new identity.
 
@@ -238,6 +235,13 @@ mount time, before any process runs. Treating those as data would make a
 brand-new machine look populated and skip the restore — losing exactly the
 recovery this is for. They are excluded from the emptiness test; anything else
 present still counts, so the guard stays fail-safe against overwriting live data.
+
+The image's own entrypoint also writes to `/opt/data`: s6 `/init` runs
+`cont-init.d/01-hermes-setup`, which creates the agent's directories plus
+`.env`, `config.yaml` and `SOUL.md`. So every service on the hermes image must
+gate on the sentinel in `entrypoint:` and then `exec
+/opt/hermes/docker/entrypoint-dispatch.sh`; a gate in `command:` runs after
+those writes and makes a fresh volume look populated to the restore guard.
 
 This replaced an `rclone sync` mirror. The reason is that a mirror is not a
 backup: it has no restore points, so anything that corrupts or deletes data

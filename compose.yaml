@@ -32,7 +32,7 @@ services:
   hermes-dashboard:
     # Pinned by tag+digest — bump deliberately, don't float on :latest (mutable
     # tags + pull_policy: always filled the machine's disk on every restart).
-    image: docker.io/nousresearch/hermes-agent:v2026.8.13@sha256:68e15ae2a6d894d0ccbd9f8aacbbe13d4d28fa5dc9b6a303970b67bb2499b1a6
+    image: docker.io/nousresearch/hermes-agent:v2026.9.24@sha256:fca358f12efd65bfaaca05884166f15c0e2788375ca30d77061ac1ebc96452b7
     platform: linux/amd64
     restart: unless-stopped
     # Gated on the restore like its siblings. Failing closed is correct here:
@@ -185,7 +185,7 @@ services:
 
   hermes:
     # Pinned by tag+digest — see hermes-dashboard for why we stopped floating on :latest.
-    image: docker.io/nousresearch/hermes-agent:v2026.8.13@sha256:68e15ae2a6d894d0ccbd9f8aacbbe13d4d28fa5dc9b6a303970b67bb2499b1a6
+    image: docker.io/nousresearch/hermes-agent:v2026.9.24@sha256:fca358f12efd65bfaaca05884166f15c0e2788375ca30d77061ac1ebc96452b7
     platform: linux/amd64
     restart: unless-stopped
     # No depends_on by design. podman-compose turns a
@@ -195,15 +195,15 @@ services:
     # measured 300s each on the rclone path, and 1800s once the restore stopped
     # publishing a sentinel, which is the 40-minute boot. Ordering is the
     # sentinel's job -- see wait_for_restore in the services below.
-    command:
-      - sh
+    # The gate MUST live in `entrypoint:`, not `command:`: the image entrypoint
+    # (s6 /init -> cont-init.d/01-hermes-setup) writes dirs, .env, config.yaml
+    # and SOUL.md into /opt/data before `command:` runs, which makes a fresh
+    # volume look populated to restic-restore's guard and skips the restore.
+    # Gate first, then exec the image entrypoint so it stays PID 1 for s6.
+    entrypoint:
+      - /bin/sh
       - -c
       - |
-        # Ordering gate. Must run before ANY write below: `mkdir /opt/data/vault`
-        # alone would make the volume look populated to restic-restore's guard, so
-        # on a fresh machine the restore would skip and disaster recovery would
-        # silently come up as an empty agent.
-        #
         # Same rule as the backup services: match the sentinel against this boot's
         # kernel boot_id, and let the bound measure time with NO restore running,
         # so a slow first-ever restore is never timed out from under us.
@@ -237,7 +237,12 @@ services:
           waited=$$(( waited + 5 ))
         done
         echo "$$(date -u +%FT%TZ) hermes         proceeded after $${waited}s" >> /opt/data/.boot-trace 2>/dev/null || true
-
+        exec /opt/hermes/docker/entrypoint-dispatch.sh "$$@"
+      - "--"
+    command:
+      - sh
+      - -c
+      - |
         mkdir -p /opt/data/vault
         if [ ! -f /opt/data/.compose-initialized ]; then
           cat > /opt/data/config.yaml <<'CFG'
@@ -250,6 +255,20 @@ services:
           touch /opt/data/.compose-initialized
           echo "[hermes] first boot: wrote default config.yaml from compose"
         fi
+        # Hermes >= v2026.9 reads allowlists from /opt/data/.env only: with
+        # several profiles (multiplex) it ignores the process env, so these
+        # ROFL-secret values read as empty and every Telegram user is blocked.
+        # Mirror them in each boot; the ROFL secret stays the source of truth.
+        # Rewritten in place (cat >) to keep .env's owner and mode.
+        for k in TELEGRAM_ALLOWED_USERS TELEGRAM_GROUP_ALLOWED_CHATS; do
+          v=$$(printenv "$$k") || continue
+          [ -n "$$v" ] || continue
+          tmp=$$(mktemp)
+          grep -vE "^(export[[:space:]]+)?$$k=" /opt/data/.env > "$$tmp" 2>/dev/null
+          printf '%s=%s\n' "$$k" "$$v" >> "$$tmp"
+          cat "$$tmp" > /opt/data/.env
+          rm -f "$$tmp"
+        done
         exec hermes gateway run
     environment:
       - GLM_BASE_URL=https://api.z.ai/api/coding/paas/v4
