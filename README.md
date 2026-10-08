@@ -355,6 +355,25 @@ refuses to do on its own, by design — say so explicitly:
 docker compose run --rm -e RESTIC_FORCE_RESTORE=1 restic-restore
 ```
 
+To roll a machine back to an earlier snapshot — recovering onto the same
+volume is deliberately refused — select it by ID and recover onto a fresh
+volume. Tag both snapshots first so retention cannot delete them mid-recovery
+(`--keep-tag keep` in `restic-backup` honors the tag):
+
+```sh
+just restic-snapshots                          # pick the ID
+just restic tag --add keep --add my-label ID   # note: retags under a NEW ID
+# .env: RESTIC_RESTORE_SNAPSHOT=<new ID>
+just ship                                       # deploy the selector
+oasis rofl machine restart --wipe-storage -y    # fresh volume, restore runs
+# verify, then .env: RESTIC_RESTORE_SNAPSHOT=latest, and `just ship` again.
+# A leftover ID makes every future recovery repeat the rollback.
+```
+
+The selector fails closed: an ID that matches no snapshot aborts the boot with
+`FATAL: RESTIC_RESTORE_SNAPSHOT=... matches no snapshot` instead of silently
+restoring `latest`.
+
 ### Verifying it works
 
 1. Deploy, wait until `just logs` shows Hermes long-polling Telegram.
