@@ -73,6 +73,12 @@ restic-init:
 test-r2 *args:
     @./scripts/test-r2.sh {{args}}
 
+# Runs the real block, rendered from each compose file, in its pinned busybox
+# image against a throwaway fixture: never the hermes-data volume.
+# Check cache-prune keeps repo checkouts and installed tools, removes caches.
+test-cache-prune *files:
+    @./scripts/test-cache-prune.sh {{files}}
+
 # Fail if the newest R2 snapshot is older than MAX_AGE_HOURS (default 3).
 # Exit: 0 fresh, 1 stale, 2 repository unreachable. Run this OFF the machine —
 # the in-enclave watchdog cannot notice that the machine itself is gone.

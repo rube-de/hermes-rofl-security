@@ -260,11 +260,16 @@ services:
       - hermes-data:/opt/data
 
   # Runs every boot, before hermes/hermes-dashboard start pulling their large
-  # images. Removes package-manager caches (pnpm/uv/npm/go module cache) and
-  # re-clonable git checkouts under hermes-data — these regrow as the agent
-  # works, and previously filled the machine's disk with no eviction. Nothing
-  # here is agent-authored data (state.db, security-review-runs, skills,
-  # sessions, vault, memories are all left alone).
+  # images. Removes package-manager download caches (pnpm/uv/npm/pip, the go
+  # module cache, toolchain downloads) under hermes-data — these regrow as the
+  # agent works, and previously filled the machine's disk with no eviction.
+  #
+  # Only genuine caches belong in this list. The repo checkouts in repo/ are
+  # canonical inputs, and home/.npm-global is an install prefix (gh and other
+  # CLIs live in its bin/), so both must survive every boot. Do not prune
+  # repos here on age or disk pressure either. Agent-authored data (state.db,
+  # security-review-runs, skills, sessions, vault, memories) is left alone too.
+  # `just test-cache-prune` runs this block against a fixture to hold that line.
   cache-prune:
     image: docker.io/library/busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
     restart: "no"
@@ -323,6 +328,15 @@ services:
           finish "no restore sentinel, prune skipped"
         fi
 
+        # Counted on both sides of the rm so the checkouts and installed tools
+        # can be seen to survive. Traced too: ROFL drops some containers' stdout.
+        kept() {
+          msg="$$1: $$(ls -A /data/repo 2>/dev/null | wc -l) entries in repo/, $$(ls -A /data/home/.npm-global/bin 2>/dev/null | wc -l) in .npm-global/bin"
+          echo "[cache-prune] $$msg"
+          trace "$$msg"
+        }
+
+        kept before
         echo "[cache-prune] before:"; df -h /data
         rm -rf \
           /data/home/.local/share/pnpm \
@@ -330,13 +344,12 @@ services:
           /data/home/.cache/pnpm \
           /data/home/.cache/node \
           /data/home/.npm \
-          /data/home/.npm-global \
           /data/home/.cache/pip \
           /data/profiles/*/home/go/pkg/mod \
           /data/toolchains/*-download \
-          /data/repo/* \
           2>/dev/null
         echo "[cache-prune] after:"; df -h /data
+        kept after
         finish "prune complete"
 
 
@@ -821,8 +834,9 @@ services:
         # mounts, and adding one to ship a text file would change the enclave
         # measurement for no benefit.
         cat > /tmp/restic-excludes <<'EXCLUDES'
-        # Regenerable caches and checkouts. These paths mirror the cache-prune
-        # service below, which is where they were verified to actually live.
+        # Caches, repo checkouts and installed tools, at the paths cache-prune
+        # found them. cache-prune keeps repo and .npm-global on disk, but they
+        # are still not backed up: a fresh-volume restore comes back without them.
         /opt/data/repo
         /opt/data/cache
         /opt/data/logs

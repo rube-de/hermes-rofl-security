@@ -268,11 +268,17 @@ itself backed up), subsequent boots leave `config.yaml` entirely alone —
 the user/agent is the sole writer.
 
 The exclude list lives inline in the `restic-backup` service. Broadly, it drops
-regenerable caches and checkouts (`repo/`, `cache/`, `logs/`, `toolchains/`,
-`node_modules`, `.venv`, `__pycache__`, …), the live SQLite files in favour of
+regenerable caches (`cache/`, `logs/`, `toolchains/`, `node_modules`, `.venv`,
+`__pycache__`, …), the repo checkouts in `repo/` and the tools installed under
+`home/.npm-global`, the live SQLite files in favour of
 the `VACUUM INTO` copies, and the machine-namespaced runtime state that Hermes'
 own `backup.py` skips on import — `gateway_state.json` above all, since a stale
 value leaves the gateway stuck "starting" and disconnected from the portal.
+
+Repo checkouts and installed tools are not caches: the boot-time `cache-prune`
+service leaves both alone, so they survive restarts and redeploys. They are
+still excluded from the backup, though, so a recovery onto a fresh volume comes
+back without them.
 
 There's also a `/opt/data/vault/` directory created on Hermes boot — drop any
 file you want preserved across machine replacement into it (or anywhere
