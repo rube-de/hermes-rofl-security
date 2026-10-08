@@ -2,7 +2,9 @@ services:
   wallet-gateway:
     # SIWE wallet gate: https://github.com/rube-de/hermes-wallet-gateway
     # Use the published image or build your own (see that repo).
-    image: ghcr.io/rube-de/hermes-wallet-gateway:latest
+    # Pinned by digest: a restart reuses the machine's cached :latest, so a new
+    # push only lands by bumping this digest (and `just ship`).
+    image: ghcr.io/rube-de/hermes-wallet-gateway:latest@sha256:28892014135bc3ff7114b9988153e53f9227a43b2b4030c6c4dd57fae76e8f19
     restart: unless-stopped
     depends_on:
       - hermes-dashboard
@@ -106,7 +108,9 @@ services:
     # https://github.com/rube-de/hermes-security-dashboard
     # No `ports:` — like hermes-dashboard, the gateway is the sole perimeter;
     # reachable internally at http://hermes-security-dashboard:3000.
-    image: ghcr.io/rube-de/hermes-security-dashboard:latest-security
+    # Pinned by digest like wallet-gateway: a restart reuses the machine's cached
+    # tag, so a new push only lands by bumping this digest (and `just ship`).
+    image: ghcr.io/rube-de/hermes-security-dashboard:latest-security@sha256:e93a39216bdc7894e8b76d6d0ec80eff0ac3c8a7a6f39a21bac36393fc744627
     platform: linux/amd64
     restart: unless-stopped
     # Wraps the image's own entrypoint rather than replacing its command, so the
