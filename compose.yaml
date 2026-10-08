@@ -490,6 +490,33 @@ services:
           finish "sibling restore finished after $${waited}s"
         fi
 
+        # This container runs as root, so a database it reinstates lands
+        # root-owned and the agent (uid 10000) cannot open it read-write -- seen
+        # in production as "kanban.db is not writable". Give each manifest DB
+        # (and its -wal/-shm) the owner of its directory, which the image sets
+        # to the agent user. Runs after a reinstatement and on every populated
+        # boot, so a volume damaged by an earlier reinstatement heals itself.
+        own_like_parent() {
+          for f in "$$1" "$$1-wal" "$$1-shm"; do
+            [ -e "$$f" ] || continue
+            [ "$$(stat -c %u "$$f")" = 0 ] || continue
+            owner=$$(stat -c %u:%g "$$(dirname "$$f")")
+            [ "$${owner%%:*}" = 0 ] && continue
+            chown "$$owner" "$$f" && chmod u+rw "$$f" || \
+              echo "[restic-restore] WARN: could not hand $$f to $$owner" >&2
+          done
+          return 0
+        }
+        heal_db_owners() {
+          manifest=/opt/data/db-snapshots/.manifest
+          [ -f "$$manifest" ] || return 0
+          while IFS="$$(printf '\t')" read -r fname rel; do
+            [ -n "$$rel" ] || continue
+            own_like_parent "/opt/data/$$rel"
+          done < "$$manifest"
+          return 0
+        }
+
         # An "empty" volume is never literally empty: the hermes image ships
         # .bashrc/.profile/.bash_logout at /opt/data (its HOME), and podman seeds a
         # fresh named volume from image content at mount time, before any process
@@ -520,6 +547,7 @@ services:
                         ! -name .boot-trace \
                         ! -name .bashrc ! -name .profile ! -name .bash_logout \
                         -print -quit 2>/dev/null)" ]; then
+          heal_db_owners
           mark_done
           finish "volume already holds data, not restoring"
         fi
@@ -578,6 +606,7 @@ services:
               if [ -e "$$dest" ]; then kept=$$(( kept + 1 )); continue; fi
               mkdir -p "$$(dirname "$$dest")"
               cp "$$snapdir/$$fname" "$$dest" && put=$$(( put + 1 ))
+              own_like_parent "$$dest"
             done < "$$snapdir/.manifest"
           else
             # Snapshots taken before the manifest existed: fall back to decoding
@@ -590,6 +619,7 @@ services:
               if [ -e "$$dest" ]; then kept=$$(( kept + 1 )); continue; fi
               mkdir -p "$$(dirname "$$dest")"
               cp "$$f" "$$dest" && put=$$(( put + 1 ))
+              own_like_parent "$$dest"
             done
           fi
           echo "[restic-restore] databases reinstated: $$put restored, $$kept already present"

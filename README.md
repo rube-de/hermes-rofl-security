@@ -195,7 +195,10 @@ The live SQLite files are excluded in favour of those clean copies, so
 `restic-restore` reinstates each one to its live path before publishing the
 sentinel — otherwise a recovered machine would come up with no databases at
 all. `db-snapshots/.manifest` records where each copy belongs; an existing
-live file is never overwritten.
+live file is never overwritten. Each reinstated database is handed to the owner
+of its directory (the agent user), since `restic-restore` runs as root and the
+agent cannot write a root-owned database; every populated boot re-applies this
+to the manifest's databases, so a volume restored before the fix heals itself.
 
 ### Why ordering is a sentinel and not `depends_on`
 
