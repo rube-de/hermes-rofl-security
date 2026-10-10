@@ -283,15 +283,20 @@ services:
       - hermes-data:/opt/data
 
   # Runs every boot, before hermes/hermes-dashboard start pulling their large
-  # images. Removes package-manager download caches (pnpm/uv/npm/pip, the go
-  # module cache, toolchain downloads) under hermes-data — these regrow as the
-  # agent works, and previously filled the machine's disk with no eviction.
+  # images. Removes package-manager download caches (pnpm/uv/npm/pip/bun, the
+  # go module and build caches, toolchain downloads) under hermes-data — these
+  # regrow as the agent works, and previously filled the machine's disk with no
+  # eviction.
   #
   # Only genuine caches belong in this list. The repo checkouts in repo/ are
   # canonical inputs, and home/.npm-global is an install prefix (gh and other
   # CLIs live in its bin/), so both must survive every boot. Do not prune
   # repos here on age or disk pressure either. Agent-authored data (state.db,
-  # security-review-runs, skills, sessions, vault, memories) is left alone too.
+  # security-review-runs, skills, sessions, vault, memories) is left alone too,
+  # with one exception: the review worker downloads its own Go toolchain and
+  # keeps its module and build caches inside each run folder, 1.2-1.5G a run
+  # that nothing reclaimed until the disk filled. Those go; the run's results,
+  # logs, prompts and helper scripts next to them stay.
   # `just test-cache-prune` runs this block against a fixture to hold that line.
   cache-prune:
     image: docker.io/library/busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
@@ -358,9 +363,29 @@ services:
           echo "[cache-prune] $$msg"
           trace "$$msg"
         }
+        disk() {
+          msg="disk $$1: $$(df -h /data | awk 'NR == 2 { print $$3 " used, " $$4 " free of " $$2 }'), $$(df -i /data | awk 'NR == 2 { print $$4 }') inodes free"
+          echo "[cache-prune] $$msg"
+          trace "$$msg"
+        }
+        # Largest folders once the caches are gone, in MiB. The backup leaves
+        # out repo/, the caches and the live databases, so when the disk fills
+        # this is the only record of where the space went.
+        sizes() {
+          du -xm -d 4 /data 2>/dev/null \
+            | awk -F '\t' '{ n = split($$2, p, "/") }
+                n == 3 || (n == 4 && p[3] ~ /^(repo|home)$$/) ||
+                (n == 5 && p[3] == "security-review-runs") ||
+                (n == 6 && p[3] == "profiles" && p[5] == "home")' \
+            | sort -rn | head -n 25 \
+            | while read -r mb path; do
+                echo "[cache-prune] size $${mb}M $$path"
+                trace "size $${mb}M $$path"
+              done
+        }
 
         kept before
-        echo "[cache-prune] before:"; df -h /data
+        disk before
         rm -rf \
           /data/home/.local/share/pnpm \
           /data/home/.cache/uv \
@@ -368,11 +393,25 @@ services:
           /data/home/.cache/node \
           /data/home/.npm \
           /data/home/.cache/pip \
+          /data/home/.cache/go-build \
           /data/profiles/*/home/go/pkg/mod \
+          /data/profiles/*/home/.bun/install/cache \
+          /data/profiles/*/home/.cache/go-build \
+          /data/profiles/*/home/.cache/pip \
+          /data/profiles/*/home/.cache/pip-audit \
+          /data/profiles/*/home/.cache/node \
+          /data/profiles/*/home/.cache/pnpm \
           /data/toolchains/*-download \
+          /data/security-review-runs/*/*/cache/go-build \
+          /data/security-review-runs/*/*/cache/go-mod \
+          /data/security-review-runs/*/*/tools/gomodcache \
+          /data/security-review-runs/*/*/tools/go \
+          /data/security-review-runs/*/*/tools/go[0-9]*.tar.gz \
+          /data/security-review-runs/*/*/tools/go.tgz \
           2>/dev/null
-        echo "[cache-prune] after:"; df -h /data
+        disk after
         kept after
+        sizes
         finish "prune complete"
 
 

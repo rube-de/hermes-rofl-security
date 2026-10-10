@@ -4,9 +4,13 @@
 #
 # Renders each compose file the way the runtime does, takes the cache-prune
 # block out of it verbatim, and runs it in the service's own pinned busybox
-# image against a throwaway fixture bind-mounted at /data. Never against the
-# hermes-data volume: the fixture is a fresh mktemp directory passed as an
-# explicit bind, which docker cannot resolve to a named volume.
+# image against a throwaway fixture volume mounted at /data. Never against the
+# hermes-data volume: each fixture is a new volume with a random name, which
+# the test refuses to reuse if it already exists, and removes on exit.
+#
+# A volume rather than a bind of a host directory, because that is what the
+# machine prunes: on Docker Desktop a bind keeps the host's permissions, and
+# container root then cannot clear Go's read-only module cache as it does there.
 #
 # Repo checkouts and installed tools must survive; the package caches must go.
 #
@@ -30,12 +34,28 @@ if [ $# -eq 0 ]; then
 fi
 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/cache-prune-test.XXXXXX")
-trap 'rm -rf "$WORK"' EXIT
+VOLUMES=""
+cleanup() {
+  local vol
+  for vol in $VOLUMES; do
+    docker volume rm "$vol" >/dev/null 2>&1 || printf 'left volume %s behind\n' "$vol" >&2
+  done
+  # u+w first: a read-only module tree the prune failed to remove would stop rm.
+  chmod -R u+w "$WORK" 2>/dev/null
+  rm -rf "$WORK"
+}
+trap cleanup EXIT
 : > "$WORK/empty.env"
 FAILED=0
 
+# Review runs laid out the way the worker leaves them on the machine.
+OC_RUN=security-review-runs/oasis-core/20261008-142136-405dd36
+CLI_RUN=security-review-runs/cli/20261006T130003Z
+WORKER_HOME=profiles/securityreviewworker/home
+
 # Must survive the prune: checkouts (one dot-named, which a glob would skip but
-# a broader rule might not), an installed CLI, and agent data next to the caches.
+# a broader rule might not), installed CLIs, agent data next to the caches, and
+# the review runs' own output beside the Go caches cleared out of them.
 SURVIVE="
 repo/hermes-agent/.git/HEAD
 repo/hermes-agent/README.md
@@ -45,6 +65,16 @@ home/.npm-global/lib/node_modules/gh/package.json
 state.db
 vault/note.md
 profiles/default/home/src/main.go
+$WORKER_HOME/.bun/bin/bun
+$WORKER_HOME/.bun/install/global/node_modules/tool/package.json
+$OC_RUN/govulncheck-results.json
+$OC_RUN/worker-log.txt
+$OC_RUN/tools/install_go.py
+$OC_RUN/cache/go-path/bin/govulncheck
+$CLI_RUN/worker-prompt.md
+$CLI_RUN/scans/semgrep-results.json
+$CLI_RUN/tools/gobin/govulncheck
+$CLI_RUN/tools/govulncheck-findings.tar.gz
 "
 # Must be removed: one file inside each genuine cache the block targets.
 REMOVE="
@@ -54,8 +84,28 @@ home/.cache/pnpm/metadata/registry.json
 home/.cache/node/corepack/pnpm.tgz
 home/.npm/_cacache/index-v5/entry
 home/.cache/pip/http/blob
+home/.cache/go-build/00/0011-d
 profiles/default/home/go/pkg/mod/cache/download/mod.zip
+$WORKER_HOME/.bun/install/cache/pkg@1.0.0/package.json
+$WORKER_HOME/.cache/go-build/00/0011-d
+$WORKER_HOME/.cache/pip/http/blob
+$WORKER_HOME/.cache/pip-audit/cache.json
+$WORKER_HOME/.cache/node/corepack/pnpm.tgz
+$WORKER_HOME/.cache/pnpm/metadata/registry.json
 toolchains/go1.23-download/go.tgz
+$OC_RUN/cache/go-build/00/0011-d
+$OC_RUN/cache/go-mod/golang.org/x/mod@v0.20.0/go.mod
+$OC_RUN/tools/go/bin/go
+$OC_RUN/tools/go1.27.0.linux-amd64.tar.gz
+$CLI_RUN/tools/gomodcache/github.com/spf13/cobra@v1.8.0/go.mod
+$CLI_RUN/tools/go/bin/go
+$CLI_RUN/tools/go.tgz
+"
+# Go writes its module cache read-only; the prune has to get through that.
+READ_ONLY="
+profiles/default/home/go/pkg/mod
+$OC_RUN/cache/go-mod
+$CLI_RUN/tools/gomodcache
 "
 # What the survival log must report: two repo entries, one installed binary.
 KEPT="2 entries in repo/, 1 in .npm-global/bin"
@@ -71,12 +121,20 @@ render() {
     2>"$WORK/render.err"
 }
 
-seed() {
+# Shell that builds the fixture inside the volume, each file holding its own
+# path so a survivor can be told from a recreated one.
+seed_script() {
   local rel
   for rel in $SURVIVE $REMOVE; do
-    mkdir -p "$1/$(dirname "$rel")"
-    printf '%s\n' "$rel" > "$1/$rel"
+    printf 'mkdir -p "/data/%s"\n' "$(dirname "$rel")"
+    printf 'echo "%s" > "/data/%s"\n' "$rel" "$rel"
   done
+  for rel in $READ_ONLY; do
+    printf 'chmod -R a-w "/data/%s"\n' "$rel"
+  done
+  # wait_for_restore only proceeds on a sentinel holding this kernel's boot_id;
+  # without it the block waits 30 minutes and then skips the prune entirely.
+  echo 'cat /proc/sys/kernel/random/boot_id > /data/.restore-complete'
 }
 
 n=0
@@ -94,7 +152,7 @@ for file in "$@"; do
   [ -n "$svc" ] || { bad "no cache-prune service"; continue; }
   printf '%s' "$svc" > "$WORK/svc.$n.json"
 
-  # The test runs `/bin/sh -c <block>` with /data as a bind. Check the service
+  # The test runs `/bin/sh -c <block>` with a volume at /data. Check the service
   # really is that shape, or a pass here would say nothing about production.
   image=$(printf '%s' "$svc" | jq -r '.image')
   printf '%s' "$svc" | jq -e '.entrypoint == ["/bin/sh"]' >/dev/null \
@@ -114,22 +172,37 @@ for file in "$@"; do
     bad "shell syntax error"; continue
   fi
 
-  fixture="$WORK/data.$n"
-  mkdir "$fixture"
-  seed "$fixture"
-  # wait_for_restore only proceeds on a sentinel holding this kernel's boot_id;
-  # without it the block waits 30 minutes and then skips the prune entirely.
-  docker run --rm --network none --entrypoint /bin/cat "$image" \
-    /proc/sys/kernel/random/boot_id > "$fixture/.restore-complete"
+  # `volume create` quietly reuses an existing volume, so check first.
+  vol="cache-prune-test-${WORK##*.}-$n"
+  if docker volume inspect "$vol" >/dev/null 2>&1; then
+    bad "volume $vol already exists, not touching it"; continue
+  fi
+  docker volume create "$vol" >/dev/null
+  VOLUMES="$VOLUMES $vol"
+  if ! seed_script | docker run --rm -i --network none \
+        --mount "type=volume,source=$vol,target=/data" \
+        --entrypoint /bin/sh "$image" -e -s; then
+    bad "could not seed the fixture volume"; continue
+  fi
 
   # busybox `timeout` bounds the run in case the gate ever stops matching.
   if ! out=$(docker run --rm --network none \
-        --mount "type=bind,source=$fixture,target=/data" \
+        --mount "type=volume,source=$vol,target=/data" \
         -e CACHE_PRUNE_LINGER=0 \
         --entrypoint /bin/sh "$image" \
         -c 'exec timeout 120 /bin/sh -c "$1"' cache-prune "$script" 2>&1); then
     printf '%s\n' "$out" | sed 's/^/    /' >&2
     bad "cache-prune block exited non-zero"; continue
+  fi
+
+  # Copied out whole, so the checks below read what the block left behind.
+  fixture="$WORK/data.$n"
+  mkdir "$fixture"
+  if ! docker run --rm --network none \
+        --mount "type=volume,source=$vol,target=/data" \
+        --entrypoint /bin/tar "$image" -C /data -cf - . \
+      | tar -C "$fixture" -xf -; then
+    bad "could not copy the fixture volume out"; continue
   fi
   case "$out" in
     *"[cache-prune] prune complete"*) ok "block ran to \"prune complete\"" ;;
@@ -159,7 +232,25 @@ for file in "$@"; do
     else
       bad "missing \"$when: $KEPT\" in output or .boot-trace"
     fi
+    disk="disk $when: [^ ]+ used, [^ ]+ free of [^ ]+, [0-9]+ inodes free\$"
+    if printf '%s\n' "$out" | grep -qE "^\[cache-prune\] $disk" \
+       && grep -qE "cache-prune    $disk" "$fixture/.boot-trace"; then
+      ok "logged and traced disk usage $when"
+    else
+      bad "missing \"disk $when\" usage in output or .boot-trace"
+    fi
   done
+
+  # The size listing exists for what the backup cannot see, so a checkout has
+  # to show up in it.
+  size="size [0-9]+M /data/repo/hermes-agent\$"
+  if printf '%s\n' "$out" | grep -qE "^\[cache-prune\] $size" \
+     && grep -qE "cache-prune    $size" "$fixture/.boot-trace"; then
+    ok "logged and traced folder sizes, repo checkouts included"
+  else
+    printf '%s\n' "$out" | grep -F '[cache-prune] size ' | sed 's/^/    /' >&2 || true
+    bad "size listing missing or without repo/hermes-agent"
+  fi
 done
 
 # The two variants are hand-kept copies with no generator behind them, so a fix

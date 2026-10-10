@@ -442,9 +442,15 @@ to Cloudflare.
   key to a repository (`restic key add`), which is the starting point if you
   need it — but the existing snapshots stay encrypted to the master key either
   way. Document and script this when you actually need it.
-- **Caches accumulate.** If skills install large dependencies (npm,
-  Python venvs), check the exclude list above — extend it if a new tool
-  introduces a cache pattern that should never be backed up.
+- **Caches accumulate.** `cache-prune` clears the known package caches at
+  every boot, including the Go toolchain and module/build caches the
+  security-review worker leaves inside each run folder (1.2–1.5G a run). It
+  also logs disk and inode usage and the largest folders, `repo/` among them,
+  to the machine logs and `.boot-trace`. Read that first when the disk fills:
+  the backup can't show the excluded paths. If skills install large
+  dependencies (npm, Python venvs), check the exclude list above. When a new
+  tool introduces a cache, add it to the prune list in both compose files
+  with a fixture in `just test-cache-prune`.
 
 ## Dashboard access (wallet gateway)
 
