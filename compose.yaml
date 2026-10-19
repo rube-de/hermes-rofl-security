@@ -110,7 +110,7 @@ services:
     # reachable internally at http://hermes-security-dashboard:3000.
     # Pinned by digest like wallet-gateway: a restart reuses the machine's cached
     # tag, so a new push only lands by bumping this digest (and `just ship`).
-    image: ghcr.io/rube-de/hermes-security-dashboard:latest-security@sha256:e93a39216bdc7894e8b76d6d0ec80eff0ac3c8a7a6f39a21bac36393fc744627
+    image: ghcr.io/rube-de/hermes-security-dashboard:latest-security@sha256:c5995668949e12f63bb94ec6a06a76c7fdbbdc6ea851c99a98d24f21a14ec959
     platform: linux/amd64
     restart: unless-stopped
     # Wraps the image's own entrypoint rather than replacing its command, so the
