@@ -71,8 +71,8 @@ at runtime are backed up to R2 and survive machine replacement. So:
   restart the hermes service.
 
 Defaults:
-- `compose.yaml`: `default: glm-5-turbo`. Z.AI's coding plan also exposes
-  `glm-5.1`, `glm-5`, `glm-4.7`, `glm-4.5-air`. See
+- `compose.yaml`: `default: glm-5.3`. Z.AI's coding plan also exposes
+  `glm-5-turbo`, `glm-5.1`, `glm-5`, `glm-4.7`, `glm-4.5-air`. See
   <https://docs.z.ai/devpack/tool/others>.
 - `compose-openrouter.yaml`: `default: anthropic/claude-opus-4.6` (upstream
   Hermes' own example default). For a cheaper steady-state, swap to e.g.

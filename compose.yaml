@@ -248,7 +248,7 @@ services:
           cat > /opt/data/config.yaml <<'CFG'
         model:
           provider: zai
-          default: glm-5-turbo
+          default: glm-5.3
           base_url: https://api.z.ai/api/coding/paas/v4
           api_mode: chat_completions
         CFG
