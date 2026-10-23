@@ -158,7 +158,7 @@ running the bundle you built.
   unpublished, so the gateway is the sole perimeter. `compose-openrouter.yaml`
   publishes nothing — Telegram is outbound long-polling.
 - **Pin images by digest for production.** In both compose files, `hermes` and
-  `hermes-dashboard` use Hermes Agent **v0.21.5 (`v2026.9.24`)**, pinned by digest.
+  `hermes-dashboard` use Hermes Agent **v0.22.5**, pinned by digest.
   The backup services, wallet gateway and security dashboard are also
   digest-pinned: the enclave identity is derived from the exact bundle, so a
   floating tag means the attested image can change and builds aren't reproducible.

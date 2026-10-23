@@ -32,7 +32,7 @@ services:
   hermes-dashboard:
     # Pinned by tag+digest — bump deliberately, don't float on :latest (mutable
     # tags + pull_policy: always filled the machine's disk on every restart).
-    image: docker.io/nousresearch/hermes-agent:v2026.9.24@sha256:fca358f12efd65bfaaca05884166f15c0e2788375ca30d77061ac1ebc96452b7
+    image: docker.io/nousresearch/hermes-agent:v0.22.5@sha256:9c5561579f3ffdf333401797094ac3a743738d6c25d40f4331c7bf77b694238d
     platform: linux/amd64
     restart: unless-stopped
     # Gated on the restore like its siblings. Failing closed is correct here:
@@ -185,7 +185,7 @@ services:
 
   hermes:
     # Pinned by tag+digest — see hermes-dashboard for why we stopped floating on :latest.
-    image: docker.io/nousresearch/hermes-agent:v2026.9.24@sha256:fca358f12efd65bfaaca05884166f15c0e2788375ca30d77061ac1ebc96452b7
+    image: docker.io/nousresearch/hermes-agent:v0.22.5@sha256:9c5561579f3ffdf333401797094ac3a743738d6c25d40f4331c7bf77b694238d
     platform: linux/amd64
     restart: unless-stopped
     # No depends_on by design. podman-compose turns a
